@@ -132,8 +132,8 @@ use graph::Fetch;
 ///
 /// [`Error::UnknownFormat`] when the first box is not `ftyp`; [`Error::NoMeta`] when the file has
 /// neither `meta` nor `moov` (a file with `moov` only parses to an empty item graph);
-/// [`Error::Truncated`] when a top-level box before `meta` runs past the end of `data` (after
-/// `meta`, an incomplete or overlong box ends the walk and item data fails per item);
+/// [`Error::Truncated`] when a top-level box before `meta` and `moov` runs past the end of `data` (after
+/// `meta` or `moov`, an incomplete or overlong box ends the walk and item data fails per item);
 /// [`Error::Malformed`] for an invalid box (a size smaller than its header or past its parent,
 /// two `meta` boxes, a `meta` that is not version 0 or whose first child is not an `hdlr` of
 /// handler `pict`, a box that is too short for its fields, an item id that appears twice in
@@ -158,7 +158,7 @@ pub fn parse(data: &[u8], limits: &Limits, cancel: &AtomicBool) -> Result<Heif, 
             Ok(Some(h)) => h,
             Ok(None) => break,
             // After `meta`, a damaged tail ends the walk (as in libheif).
-            Err(Error::Truncated) if top.meta.is_some() => break,
+            Err(Error::Truncated) if top.meta.is_some() || top.has_moov => break,
             Err(e) => return Err(e),
         };
         top.note(&h);
@@ -293,7 +293,7 @@ pub fn read<R: Read + Seek>(mut r: R, limits: &Limits, cancel: &AtomicBool) -> R
         }
         let h = match decode_header(buf, pos, file_len, true) {
             Ok(h) => h,
-            Err(Error::Truncated) if top.meta.is_some() => break,
+            Err(Error::Truncated) if top.meta.is_some() || top.has_moov => break,
             Err(e) => return Err(e),
         };
         top.note(&h);
@@ -657,6 +657,11 @@ mod tests {
         seq.extend_from_slice(&bx(b"moov", &[]));
         let h = parse(&seq, &l, &c).unwrap();
         assert!(h.has_moov && h.items.is_empty() && h.primary == 0);
+        assert_eq!(read(Cursor::new(&seq[..]), &l, &c).unwrap(), h);
+        // A truncated box after `moov` ends the walk.
+        seq.extend_from_slice(&[0, 0, 0, 0x40, b'm', b'd', b'a', b't']);
+        let h = parse(&seq, &l, &c).unwrap();
+        assert!(h.has_moov);
         assert_eq!(read(Cursor::new(&seq[..]), &l, &c).unwrap(), h);
         // Two meta boxes.
         let mut two = sample(&[]);

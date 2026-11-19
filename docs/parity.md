@@ -107,6 +107,12 @@ gainmap-meta <fields>                        only when gainmap 1 (see below)
   colour item (all tiles of a grid), the alpha item (all its tiles) and the gain map item, when
   each exists; `0 0` when the data is in `idat`. For a grid, libavif has alpha only when every
   tile has an alpha item (`alpha 1`), and the alpha items of the tiles are in the range.
+  libavif checks the file size only when it reads the data, so the oracle prints `extent error`
+  when the range ends past the end of the file (isobmff-rs drops such an item's extents at parse).
+- `pixi`/`pasp`/`lsel`: libheif treats them as optional (the image opens without them); libavif
+  fails the whole parse when one does not parse, so the avif oracle prints `error` for such a file.
+- `iden`: libheif checks the input of an `iden` only when decoding; the heif oracle reports an
+  `iden` without exactly one `dimg` input as `note` (no image block), like isobmff-rs.
 - `gainmap` is 1 only when `ftyp` has the `tmap` brand and the tmap item is found (libavif rule).
   `gainmap-meta`: `base=<n>/<d> alt=<n>/<d> min=<n>/<d>,... max=... gamma=... baseoff=... altoff=... base_cs=<0|1>`
   per channel (3 channels; a single-channel map repeats channel 0).

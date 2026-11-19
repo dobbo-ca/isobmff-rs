@@ -90,10 +90,10 @@ General ISO-BMFF reader, also for the later MP4/MOV work (`moov/trak/mdia/minf/s
    `Malformed("meta")`). Neither `meta` nor `moov`: `Error::NoMeta`. `moov` without `meta` (an
    image sequence, as libheif accepts it) is an empty item graph: `has_moov` set, no items,
    primary 0. `moov` is noted (`Heif::has_moov`), not parsed in v1. Other boxes (`mdat`, `free`,
-   `skip`, `uuid`, ...) are skipped. Once `meta` has been found, a top-level box with an
+   `skip`, `uuid`, ...) are skipped. Once `meta` or `moov` has been found, a top-level box with an
    incomplete header or that runs past the end of the file (libheif and libavif stop reading
    there) ends the walk instead of being `Truncated`; item data past the end of the file then
-   fails per item (`item_bytes` gives `Truncated`). Before `meta` it is still `Truncated`.
+   fails per item (`item_bytes` gives `Truncated`). Before `meta` and `moov` it is still `Truncated`.
 3. `meta` is a FullBox (version 0). Its `hdlr` must be the first child with handler `pict` (else
    `Malformed("hdlr")`).
 
@@ -102,7 +102,7 @@ General ISO-BMFF reader, also for the later MP4/MOV work (`moov/trak/mdia/minf/s
 | Box | Versions | Kept |
 |---|---|---|
 | `pitm` | 0 (u16 id), 1 (u32 id) | `primary` |
-| `iinf` | 0 (u16 count), 1 (u32 count) | one `infe` per entry; count checked against children |
+| `iinf` | 0 (u16 count), 1 (u32 count) | the first entry_count children; non-`infe` skipped; fewer is Malformed |
 | `infe` | 2 (u16 id), 3 (u32 id); 0/1 accepted, kept as item type `\0\0\0\0` | id, protection index, item_type, item_name, `mime`: content_type + content_encoding, `uri `: uri_type; `hidden` = flags & 1 |
 | `iloc` | 0, 1, 2 | per item: construction method, data_reference_index, base_offset, extents |
 | `idat` | - | payload range, for construction method 1 |
@@ -129,7 +129,8 @@ read.
 
 Every `ipco` child becomes a `Property { kind: FourCc, range: Extent (payload), value: PropValue }`.
 Parsing a property is lazy-safe: a known property that does not parse is `PropValue::Invalid` (the
-graph then fails only the images that use it, with `Error::Malformed(<4cc>)`).
+graph then fails only the images that use it, with `Error::Malformed(<4cc>)`), except `pixi`,
+`pasp` and `lsel`, which libheif treats as optional: the image is kept without them.
 
 | 4cc | Value |
 |---|---|
@@ -142,6 +143,7 @@ graph then fails only the images that use it, with `Error::Malformed(<4cc>)`).
 | `pasp` | hSpacing u32, vSpacing u32 |
 | `auxC` | FullBox v0: aux_type (NUL-terminated string), aux_subtype bytes (Extent) |
 | `lsel` | layer_id u16 |
+| `rref` | FullBox v0/1: count (u32 when the payload is a non-empty multiple of 4, else u8), reference types; an image whose `rref` lists a type other than `thmb base cdsc dimg auxl prem` is `Unsupported("rref")` |
 | `a1op` | op_index u8 |
 | `a1lx` | flags & 1 -> u32 sizes, else u16; 3 layer sizes |
 | `hvcC` | header fields (version, profile space/tier/idc, chroma_format_idc, bit depths, length_size_minus_one) + NAL arrays: `(nal_type, [Extent])`; whole payload as `Extent` |

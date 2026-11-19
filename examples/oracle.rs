@@ -678,6 +678,14 @@ fn avif_text(name: &str, data: &[u8], dir: &Path, lim: &Limits) -> String {
         Ok(h) => h,
         Err(e) => return fail(name, "parse", e),
     };
+    // libavif fails the parse when a pixi, pasp or lsel in ipco does not parse (read.c:2949-2964).
+    if let Some(p) = h
+        .properties
+        .iter()
+        .find(|p| matches!(&p.kind.0, b"pixi" | b"pasp" | b"lsel") && p.value == PropValue::Invalid)
+    {
+        return fail(name, "ipco", format!("malformed {}", p.kind));
+    }
     let img = match h.primary_image() {
         Ok(i) => i,
         Err(e) => return fail(name, "primary image", e),

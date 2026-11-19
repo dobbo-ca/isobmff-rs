@@ -318,7 +318,34 @@ static void dump_image(FILE *f, const char *name, heif_context *ctx, const char 
     int ispe_w, ispe_h, n, i;
     heif_color_profile_nclx *nclx = NULL;
     size_t icc_len;
-    heif_error herr = heif_context_get_image_handle(ctx, id, &h);
+    heif_error herr;
+    size_t dimg_total = 0;
+
+    /* libheif checks the input of an iden only when decoding; isobmff-rs needs exactly one dimg input */
+    if (type == (('i' << 24) | ('d' << 16) | ('e' << 8) | 'n')) {
+        int k;
+        for (k = 0; k < (1 << 20); k++) {
+            uint32_t rtype = 0;
+            heif_item_id *to = NULL;
+            size_t cnt = heif_context_get_item_references(ctx, id, k, &rtype, &to);
+            if (cnt == 0 && !to) {
+                break;
+            }
+            if (rtype == (('d' << 24) | ('i' << 16) | ('m' << 8) | 'g')) {
+                dimg_total += cnt;
+            }
+            if (to) {
+                heif_release_item_references(ctx, &to);
+            }
+        }
+        if (dimg_total != 1) {
+            char what[64];
+            snprintf(what, sizeof what, "image %u", id);
+            note(name, what, "iden without exactly one dimg input");
+            return;
+        }
+    }
+    herr = heif_context_get_image_handle(ctx, id, &h);
 
     if (herr.code != heif_error_Ok || !h) {
         char what[64];

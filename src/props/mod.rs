@@ -91,6 +91,11 @@ pub enum PropValue {
     /// A property this crate knows by name and ignores (`clli`, `mdcv`, `cclv`, `amve`,
     /// `altt`, or a `colr` of another colour type).
     Other,
+    /// `rref`: the reference types the item requires its reader to understand.
+    Rref {
+        /// The listed reference types.
+        types: Vec<FourCc>,
+    },
     /// A property type this crate does not know. Essential, it makes the image unsupported.
     Unknown,
     /// A known property that does not parse. Only the images that use it fail, with
@@ -116,6 +121,7 @@ pub(crate) fn parse_value(
         b"colr" => image::colr(bytes, base),
         b"auxC" => image::auxc(bytes, base, budget),
         b"lsel" => image::lsel(bytes, base),
+        b"rref" => image::rref(bytes, base, budget),
         b"a1op" => image::a1op(bytes, base),
         b"a1lx" => image::a1lx(bytes, base),
         b"hvcC" => budget

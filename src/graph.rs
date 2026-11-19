@@ -28,6 +28,9 @@ const DEPTH_TYPES: [&str; 2] = [
 const APPLE_GAIN_MAP: &str = "urn:com:apple:photo:2020:aux:hdrgainmap";
 const XMP_TYPE: &str = "application/rdf+xml";
 
+/// The reference types an `rref` may list (libheif box.cc:4313-4320).
+const RREF_TYPES: [&[u8; 4]; 6] = [b"thmb", b"base", b"cdsc", b"dimg", b"auxl", b"prem"];
+
 /// Item types that are images (the candidates of [`Heif::top_level_images`]).
 const IMAGE_TYPES: [&[u8; 4]; 12] = [
     b"hvc1", b"av01", b"grid", b"iovl", b"iden", b"tmap", b"jpeg", b"j2k1", b"unci", b"mski",
@@ -658,7 +661,9 @@ impl Heif {
     /// # Errors
     ///
     /// [`Error::NoSuchItem`] for an unknown id; [`Error::Unsupported`] when the item is not an
-    /// image type; [`Error::Malformed`] when a property of the image does not parse, an `ipma`
+    /// image type or its `rref` lists a reference type other than `thmb`, `base`, `cdsc`, `dimg`,
+    /// `auxl` or `prem`; [`Error::Malformed`] when a property of the image other than `pixi`,
+    /// `pasp` or `lsel` (optional, as in libheif) does not parse, an `ipma`
     /// index is past `ipco`, a coded image lacks its `hvcC` or `av1C`, or a grid, overlay or
     /// identity image does not match its tiles or inputs; [`Error::LimitExceeded`] with
     /// `Limit::Pixels` for an image larger than the `max_pixels` of the parse (and the limit
@@ -727,7 +732,15 @@ impl Heif {
                 PropValue::Av1c(v) => av1c = Some(*v),
                 PropValue::AuxC { .. } | PropValue::Other => {}
                 PropValue::Unknown => unknown_essential |= a.essential,
+                // libheif treats these as optional: the image keeps going without them
+                // (box.h:1402,1429,1452; context.cc:740-753).
+                PropValue::Invalid if matches!(&p.kind.0, b"pixi" | b"pasp" | b"lsel") => {}
                 PropValue::Invalid => return Err(Error::Malformed(kind_name(p.kind))),
+                PropValue::Rref { types } => {
+                    if types.iter().any(|t| !RREF_TYPES.contains(&&t.0)) {
+                        return Err(Error::Unsupported("rref"));
+                    }
+                }
             }
         }
         if has_layer {

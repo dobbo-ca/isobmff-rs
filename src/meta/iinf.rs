@@ -85,16 +85,17 @@ pub(crate) fn parse(
     let mut out = ctx.budget.vec::<ItemInfo>(count)?;
     let kids = payload.start.saturating_add(head)..payload.end;
     let mut boxes = Boxes::new(ctx, kids, depth.saturating_add(1), false)?;
-    while let Some(h) = boxes.next_box()? {
-        if h.kind.0 != *b"infe" {
-            continue;
+    // The first `count` children are the entries, whatever their type (libheif box.cc:1154-1192,
+    // libavif read.c:3318-3331); one that is not `infe` is skipped, later children are ignored.
+    let mut seen: usize = 0;
+    while seen < count {
+        let Some(h) = boxes.next_box()? else { break };
+        seen = seen.saturating_add(1);
+        if h.kind.0 == *b"infe" {
+            out.push(parse_infe(ctx.slice(h.payload())?, ctx.budget)?);
         }
-        if out.len() >= count {
-            return Err(Error::Malformed("iinf"));
-        }
-        out.push(parse_infe(ctx.slice(h.payload())?, ctx.budget)?);
     }
-    if out.len() != count {
+    if seen != count {
         return Err(Error::Malformed("iinf"));
     }
     Ok(out)

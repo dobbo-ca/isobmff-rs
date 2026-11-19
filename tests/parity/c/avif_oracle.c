@@ -322,7 +322,9 @@ static int dump_one(const char *path, const char *name, void *argp)
             fputs("pasp -\n", f);
         }
         memset(&ext, 0, sizeof ext);
-        if (avifDecoderNthImageMaxExtent(d, 0, &ext) == AVIF_RESULT_OK) {
+        /* libavif checks the file size only when it reads the data; isobmff-rs drops an extent past the end */
+        if (avifDecoderNthImageMaxExtent(d, 0, &ext) == AVIF_RESULT_OK && ext.offset <= len &&
+            ext.size <= len - ext.offset) {
             fprintf(f, "extent %llu %zu\n", (unsigned long long)ext.offset, ext.size);
         } else {
             fputs("extent error\n", f);

@@ -1,8 +1,8 @@
-//! The small property boxes: `ispe pixi pasp irot imir clap colr auxC lsel a1op a1lx`.
+//! The small property boxes: `ispe pixi pasp irot imir clap colr auxC lsel rref a1op a1lx`.
 
 use crate::boxes::{Cur, full_header};
 use crate::budget::Budget;
-use crate::{Error, Extent};
+use crate::{Error, Extent, FourCc};
 
 use super::PropValue;
 
@@ -211,6 +211,28 @@ pub(crate) fn lsel(bytes: &[u8], base: u64) -> Result<PropValue, Error> {
     })
 }
 
+pub(crate) fn rref(bytes: &[u8], base: u64, budget: &Budget<'_>) -> Result<PropValue, Error> {
+    let (version, mut c) = full("rref", bytes, base)?;
+    if version > 1 {
+        return Err(Error::Malformed("rref"));
+    }
+    // libheif reads the count as u32 when the payload is a non-empty multiple of 4 (box.cc:4274-4288).
+    let rem = c.remaining();
+    let n = if rem > 0 && rem.is_multiple_of(4) {
+        usize::try_from(c.u32()?).map_err(|_| Error::Malformed("rref"))?
+    } else {
+        usize::from(c.u8()?)
+    };
+    if !c.fits(n, 4) {
+        return Err(Error::Malformed("rref"));
+    }
+    let mut types = budget.vec::<FourCc>(n)?;
+    for _ in 0..n {
+        types.push(c.fourcc()?);
+    }
+    Ok(PropValue::Rref { types })
+}
+
 pub(crate) fn a1op(bytes: &[u8], base: u64) -> Result<PropValue, Error> {
     Ok(PropValue::A1op {
         op_index: Cur::new("a1op", bytes, base).u8()?,
@@ -230,6 +252,18 @@ pub(crate) fn a1lx(bytes: &[u8], base: u64) -> Result<PropValue, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rref_counts() {
+        let l = crate::Limits::default();
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let b = Budget::new(&l, &stop);
+        let want = PropValue::Rref {
+            types: vec![FourCc(*b"pred")],
+        };
+        assert_eq!(rref(b"\0\0\0\0\x01pred", 0, &b), Ok(want.clone()));
+        assert_eq!(rref(b"\0\0\0\0\0\0\0\x01pred", 0, &b), Ok(want));
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn clap(wn: u32, wd: u32, hn: u32, hd: u32, xn: i32, xd: u32, yn: i32, yd: u32) -> Clap {
