@@ -1,7 +1,7 @@
 //! The item graph: items, references and properties joined into [`Image`]s.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -135,6 +135,9 @@ pub struct Heif {
     fwd: Vec<(u32, u32)>,
     /// (`to` id, position in `references`), sorted.
     rev: Vec<(u32, u32)>,
+    /// (entity id, `groups` position, first position in the group) of every `altr` group,
+    /// sorted, one entry per (entity, group).
+    altr: Vec<(u32, u32, u32)>,
 }
 
 /// The codec of a coded image.
@@ -364,8 +367,12 @@ fn derive<F: Fetch>(
     for e in extents {
         total = total.saturating_add(usize::try_from(e.length).unwrap_or(usize::MAX));
     }
+    if total > DERIVED_MAX || (what == "grid" && total > GRID_MAX) {
+        return Ok(Some(Err(Error::Malformed(what))));
+    }
+    // Only payloads that are read count toward the total.
     *spent = spent.saturating_add(total);
-    if total > DERIVED_MAX || (what == "grid" && total > GRID_MAX) || *spent > DERIVED_TOTAL_MAX {
+    if *spent > DERIVED_TOTAL_MAX {
         return Ok(Some(Err(Error::Malformed(what))));
     }
     let mut buf = ctx.budget.vec::<u8>(total)?;
@@ -474,6 +481,22 @@ pub(crate) fn build<F: Fetch>(
     }
     rev.sort_unstable();
     rev.dedup();
+    let altr_groups = || {
+        groups
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| g.kind.0 == *b"altr")
+    };
+    let altr_total = altr_groups().fold(0usize, |n, (_, g)| n.saturating_add(g.entities.len()));
+    let mut altr = budget.vec::<(u32, u32, u32)>(altr_total)?;
+    for (gi, g) in altr_groups() {
+        for (pos, &e) in g.entities.iter().enumerate() {
+            altr.push((e, gi as u32, pos as u32));
+        }
+    }
+    // Sorted by (entity, group, position): dedup keeps the first position of each pair.
+    altr.sort_unstable();
+    altr.dedup_by_key(|a| (a.0, a.1));
     Ok(Heif {
         ftyp,
         primary,
@@ -491,6 +514,7 @@ pub(crate) fn build<F: Fetch>(
         index,
         fwd,
         rev,
+        altr,
     })
 }
 
@@ -578,22 +602,30 @@ impl Heif {
         (exif, xmp)
     }
 
+    /// The `altr` index entries of entity `id`: (id, group, first position), sorted by group.
+    fn altr_of(&self, id: u32) -> &[(u32, u32, u32)] {
+        let lo = self.altr.partition_point(|a| a.0 < id);
+        let hi = self.altr.partition_point(|a| a.0 <= id);
+        self.altr.get(lo..hi).unwrap_or(&[])
+    }
+
     /// The gain map of image `id`: a `tmap` item with `dimg` `[id, gain map]` that comes before
     /// `id` in an `altr` group, else an Apple `auxl` gain map.
     ///
-    /// Each `tmap` is looked at once and each `altr` group is scanned once, so the work is linear
-    /// in the references and group entities however they are repeated.
+    /// Each `tmap` is looked at once; the `altr` order comes from the sorted index built with the
+    /// graph, so a call costs O(candidates x groups holding `id` x log entities), not a group scan.
     fn gain_map(&self, id: u32, aux: &[Aux]) -> Option<GainMap> {
         let mut seen = HashSet::new();
         let mut cands = Vec::new();
         for r in self.refs_to(id).filter(|r| r.kind.0 == *b"dimg") {
             let t = r.from;
-            if !seen.insert(t) {
-                continue;
-            }
             let Some(item) = self.item(t).filter(|i| i.item_type.0 == *b"tmap") else {
                 continue;
             };
+            // Only tmap items enter the set, so it is bounded by the items.
+            if !seen.insert(t) {
+                continue;
+            }
             let Some(Ok(Derived::Tmap(metadata))) = &item.derived else {
                 continue;
             };
@@ -607,20 +639,20 @@ impl Heif {
                 cands.push((t, gm, *metadata));
             }
         }
-        let idx: HashMap<u32, usize> = cands.iter().enumerate().map(|(i, c)| (c.0, i)).collect();
-        // The first candidate (in reference order) that precedes `id` in some `altr` group.
-        let mut best: Option<usize> = None;
-        for g in self.groups.iter().filter(|g| g.kind.0 == *b"altr") {
-            let Some(pid) = g.entities.iter().position(|&e| e == id) else {
-                continue;
-            };
-            for &e in g.entities.iter().take(pid) {
-                if let Some(&i) = idx.get(&e) {
-                    best = Some(best.map_or(i, |b| b.min(i)));
-                }
-            }
-        }
-        if let Some(&(t, gm, metadata)) = best.and_then(|i| cands.get(i)) {
+        // The first candidate (in reference order) that precedes `id` in some `altr` group,
+        // from the sorted `altr` index: no group scan per call.
+        let mine = self.altr_of(id);
+        let best = cands.iter().find(|c| {
+            let theirs = self.altr_of(c.0);
+            mine.iter().any(|&(_, g, pid)| {
+                theirs
+                    .binary_search_by_key(&g, |a| a.1)
+                    .ok()
+                    .and_then(|i| theirs.get(i))
+                    .is_some_and(|a| a.2 < pid)
+            })
+        });
+        if let Some(&(t, gm, metadata)) = best {
             return Some(GainMap {
                 image: gm,
                 tmap: Some(t),

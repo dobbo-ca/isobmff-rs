@@ -177,8 +177,9 @@ drops the item.
   `data`).
 - Derived payloads are read while the graph is built (so that `read` needs no `Heif` method that
   takes the file): `Item::derived` is `Option<Result<Derived, Error>>`; the `Err` (malformed,
-  `max_pixels`, `max_grid_tiles`) is what `Heif::image` gives for that item. Payloads over 4 MiB
-  are `Malformed`.
+  `max_pixels`, `max_grid_tiles`) is what `Heif::image` gives for that item. Payloads over 4 MiB,
+  grid payloads over 12 bytes, and payloads once 64 MiB of derived payloads were read for one
+  graph are `Malformed`.
 
 ## Transforms
 
@@ -211,6 +212,7 @@ pub struct Heif {
     pub properties: Vec<Property>,  // ipco order (index i+1)
     pub references: Vec<Reference>, // iref order
     pub groups: Vec<EntityGroup>,   // grpl order
+    pub other_boxes: Vec<(FourCc, Extent)>, // other meta children (ipro, dinf, unknown), whole box
     pub has_moov: bool,
     pub stats: Stats,               // boxes visited, max depth
 }
@@ -271,7 +273,7 @@ pub struct Image {
 
 ## Limits
 
-Every public function takes `&Limits` and `&AtomicBool` (cancel). Each cap has its own `Limit`
+`parse`, `read`, `item_bytes` and `metadata` take `&Limits` and `&AtomicBool` (cancel); the `Heif` accessors work on the already-bounded graph. Each cap has its own `Limit`
 variant: `Error::LimitExceeded(Limit::X)`.
 
 | Field | Default | Counts | libheif 1.23.7 default |

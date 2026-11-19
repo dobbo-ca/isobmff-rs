@@ -104,8 +104,15 @@ pub(crate) fn parse(ctx: &Ctx<'_>, hdr: &BoxHeader) -> Result<Meta, Error> {
             b"grpl" => once(&mut groups, grpl::parse(ctx, p, 1, &mut ids)?, "grpl")?,
             _ => {
                 // Kept, not parsed (owner rule: metadata is never dropped).
-                ctx.budget.charge(size_of::<(FourCc, Extent)>())?;
-                other.try_reserve(1).map_err(|_| Error::OutOfMemory)?;
+                if other.len() == other.capacity() {
+                    // Grow by doubling; the whole new capacity is charged first.
+                    let add = other.capacity().max(4);
+                    ctx.budget
+                        .charge(add.saturating_mul(size_of::<(FourCc, Extent)>()))?;
+                    other
+                        .try_reserve_exact(add)
+                        .map_err(|_| Error::OutOfMemory)?;
+                }
                 other.push((
                     h.kind,
                     Extent {

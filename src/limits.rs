@@ -1,5 +1,5 @@
-/// Caps on one call. Every public entry point takes `&Limits` and a cancel flag; there is no
-/// unlimited entry point. The defaults are finite and far above every real phone and camera
+/// Caps on one call. `parse`, `read`, `item_bytes` and `metadata` take `&Limits` and a cancel
+/// flag; there is no unlimited entry point. The defaults are finite and far above every real phone and camera
 /// file (an iPhone 48 MP file has 48 tiles in one grid).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
