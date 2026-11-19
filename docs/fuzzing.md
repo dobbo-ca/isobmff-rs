@@ -42,7 +42,7 @@ gh workflow run fuzz.yml --ref <branch> -f only=tmap
 
 ## Fuzz hours
 
-TBD: sum of `max_total_time` x targets over the runs on `main`.
+2.5 h, 0 crashes: fuzz.yml run 44581507012 on main 68eaa95, 10 targets x 900 s.
 
 Five targets (`iloc`, `iinf`, `iref`, `ipma`, `ipco`) and `derived` and `tmap` take a raw box or
 item payload, which a whole-file seed never reaches. `tests/fuzz/payload-seeds/<target>/` holds

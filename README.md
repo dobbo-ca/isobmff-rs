@@ -8,7 +8,7 @@ dependencies, `#![forbid(unsafe_code)]`, bounded on hostile input. libheif and l
 parity oracles in CI.
 
 ```toml
-isobmff = { git = "https://github.com/dobbo-ca/isobmff-rs", rev = "TBD" }
+isobmff = { git = "https://github.com/dobbo-ca/isobmff-rs", rev = "68eaa9583a590ae3ef687594ed73dc9ff991ca45" }
 ```
 
 ## Quick start
