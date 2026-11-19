@@ -25,7 +25,9 @@ fn read_and_parse_fail_alike() {
     let c = AtomicBool::new(false);
     let d = Limits::default();
     let mut cut = single();
-    cut.truncate(cut.len() - 3);
+    // Cut inside `meta`: after `meta`, a damaged tail is not an error (see below).
+    let at = cut.windows(4).position(|w| w == b"meta").unwrap();
+    cut.truncate(at + 8);
     let free = bx(b"free", &[0; 8]);
     let ftyp_only = bx(b"ftyp", b"heic\0\0\0\0");
     let cases = [
@@ -121,4 +123,16 @@ fn read_copies_only_ftyp_and_meta() {
     assert_eq!(buf, [2; 4]);
     let end = want.item(49).unwrap().data.clone().unwrap()[0];
     assert_eq!(end.end(), Some(file.len() as u64));
+}
+
+#[test]
+fn damaged_tail_after_meta_fails_per_item() {
+    let c = AtomicBool::new(false);
+    let d = Limits::default();
+    let mut file = single();
+    file.truncate(file.len() - 3);
+    let a = isobmff::parse(&file, &d, &c).unwrap();
+    let b = isobmff::read(Cursor::new(&file[..]), &d, &c).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a.item_bytes(&file, 1, &d, &c), Err(Error::Truncated));
 }

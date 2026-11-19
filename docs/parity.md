@@ -18,6 +18,16 @@ Strings are written escaped: bytes 0x21..0x7e except `%` are written as is; ever
 A FourCC is written with the same escape. Lists are comma separated, `-` when empty. Numbers are
 decimal. Every line ends with `\n`. No trailing spaces.
 
+Strings that isobmff-rs stores as UTF-8 (item name, `ctype`, `cenc`, `uri`, aux type, meta content
+type) are written after the lossy UTF-8 conversion of `String::from_utf8_lossy` (one U+FFFD,
+`%EF%BF%BD`, per maximal invalid sequence); the C oracle does the same before escaping. FourCCs
+(including the meta type) are raw bytes. `ispe` is unsigned.
+
+Both oracles also write one line per error to stderr, `<name>TAB<what>: <message>` (open or parse
+failure, an image or aux handle that does not open, item data that fails, libavif's
+`diag.error`); run.sh collects them in `errors.tsv` (name, pair, oracle, isobmff-rs). They are for
+diagnosis, not gated.
+
 ### `graph.txt` (heif_oracle and `oracle heif`)
 
 First line `ok`, or `error` and nothing else (the file did not open: libheif
@@ -51,13 +61,24 @@ grid <id> <columns>x<rows> tile=<w>x<h> out=<w>x<h> tiles=<ids>       tiles row-
 - `prop`: libheif `heif_item_get_properties_of_type(..., heif_item_property_type_invalid, ...)`;
   `<n>` is the 1-based position in the item's ipma list (index 0 skipped). `irot` adds
   `rot=<deg>` (anticlockwise), `imir` adds `axis=<0|1>`.
-- `group`: `heif_context_get_entity_groups(ctx, 0, 0, &n)`.
+- `prop`: a property that failed to parse is listed by libheif as type `ERR ` (`ERR%20`);
+  isobmff-rs prints the same for `PropValue::Invalid`. Files where the two parsers disagree on
+  what is broken (e.g. `pixi` with version other than 0) differ.
+- `group`: `heif_context_get_entity_groups(ctx, 0, 0, &n)`. libheif only exposes `altr`, `ster`
+  and `pymd` groups, so isobmff-rs prints only those types.
+- `colr`: libheif keeps the last `colr` of each kind and treats nclx (2, 2, 2, full range) as no
+  profile; the oracle does the same. A grid without a profile takes its first tile's.
+- `alpha` (of `image`): for a grid, libheif reports alpha when any tile has alpha; the oracle
+  checks the tiles. `aux`: `-` as type when libheif cannot open the aux image (no `av1C`/`hvcC`).
 - `image` and the lines after it: one block per top-level image, ascending id
   (`heif_context_get_list_of_top_level_image_IDs`, sorted). `size` is
   `heif_image_handle_get_width/height` (after transforms), isobmff-rs `Image::display_size`.
   `bits` only for `hvc1` and `av01` items (luma/chroma bits from hvcC/av1C), else `-`. `icc` bytes
   go to `icc-<id>.bin`. `grid` only for `grid` items:
-  `heif_image_handle_get_image_tiling(h, 0, &t)` and `heif_image_handle_get_grid_image_tile_id`.
+  `heif_image_handle_get_image_tiling(h, 0, &t)` and `heif_image_handle_get_grid_image_tile_id`;
+  `tile=` is the first tile's size after its transforms (`Image::display_size`), as libheif
+  reports it. The Rust oracle runs `heif` with `max_pixels` unlimited, as libheif runs with its
+  security limits off.
 
 ### `avif.txt` (avif_oracle and `oracle avif`)
 
@@ -84,7 +105,8 @@ gainmap-meta <fields>                        only when gainmap 1 (see below)
 - `size` is ispe (or grid output size), untransformed. `depth`/`yuv` from av1C.
 - `extent`: one merged range from the lowest offset to the highest end of every extent of the
   colour item (all tiles of a grid), the alpha item (all its tiles) and the gain map item, when
-  each exists; `0 0` when the data is in `idat`.
+  each exists; `0 0` when the data is in `idat`. For a grid, libavif has alpha only when every
+  tile has an alpha item (`alpha 1`), and the alpha items of the tiles are in the range.
 - `gainmap` is 1 only when `ftyp` has the `tmap` brand and the tmap item is found (libavif rule).
   `gainmap-meta`: `base=<n>/<d> alt=<n>/<d> min=<n>/<d>,... max=... gamma=... baseoff=... altoff=... base_cs=<0|1>`
   per channel (3 channels; a single-channel map repeats channel 0).
@@ -99,8 +121,9 @@ gainmap-meta <fields>                        only when gainmap 1 (see below)
    counted. A known difference whose diff became empty fails the gate (stale entry).
 2. **Mutations**: `oracle gen` makes deterministic mutations (truncations, bit flips, size-field
    edits) of every corpus file under 1 MiB. For each, both sides run; where both give `ok`, the
-   trees must be equal. The ok/error split is reported, not gated (libheif and isobmff-rs reject
-   different broken files).
+   trees must be equal, except mutations of a file listed in `known-differences.tsv` for that
+   side (the name without the mutation suffix), which are counted as known and not diffed. The
+   ok/error split is reported, not gated (libheif and isobmff-rs reject different broken files).
 3. **Threads and read**: `oracle heif --threads 1` equals the default, and `oracle heif --read`
    (the `Read + Seek` path, item bytes read through the reader) equals the slice path.
 4. **Coverage**: the run fails when the corpus has fewer files than `PARITY_MIN_INPUTS`, so a

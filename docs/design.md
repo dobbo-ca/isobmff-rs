@@ -72,7 +72,8 @@ General ISO-BMFF reader, also for the later MP4/MOV work (`moov/trak/mdia/minf/s
   the box runs to the end of its parent (for a top-level box: the end of the file). `type ==
   'uuid'`: a 16-byte extended type follows. A size smaller than the header, or an end past the
   parent end, is `Error::Malformed("box size")` — except a top-level box that runs past the end of
-  the file, which is `Error::Truncated`.
+  the file, which is `Error::Truncated` (but see "What `parse` checks at the top level": after
+  `meta` it ends the walk).
 - `BoxHeader { kind: FourCc, uuid: Option<[u8; 16]>, start: u64, header_len: u8 (8, 16, 24 or 32),
   end: u64 }` with `payload() -> Range<u64>`.
 - FullBox: `version: u8`, `flags: u24` after the header (`full_header(payload) -> (version, flags,
@@ -85,9 +86,14 @@ General ISO-BMFF reader, also for the later MP4/MOV work (`moov/trak/mdia/minf/s
 ## What `parse` checks at the top level
 
 1. The first box is `ftyp` (else `Error::UnknownFormat`). Brands are kept as given.
-2. Top-level boxes are walked to the end of the file. `meta` must appear exactly once (else
-   `Malformed("meta")`; none: `Error::NoMeta`). `moov` is noted (`Heif::has_moov`), not parsed in
-   v1. Other boxes (`mdat`, `free`, `skip`, `uuid`, ...) are skipped.
+2. Top-level boxes are walked to the end of the file. `meta` must appear at most once (else
+   `Malformed("meta")`). Neither `meta` nor `moov`: `Error::NoMeta`. `moov` without `meta` (an
+   image sequence, as libheif accepts it) is an empty item graph: `has_moov` set, no items,
+   primary 0. `moov` is noted (`Heif::has_moov`), not parsed in v1. Other boxes (`mdat`, `free`,
+   `skip`, `uuid`, ...) are skipped. Once `meta` has been found, a top-level box with an
+   incomplete header or that runs past the end of the file (libheif and libavif stop reading
+   there) ends the walk instead of being `Truncated`; item data past the end of the file then
+   fails per item (`item_bytes` gives `Truncated`). Before `meta` it is still `Truncated`.
 3. `meta` is a FullBox (version 0). Its `hdlr` must be the first child with handler `pict` (else
    `Malformed("hdlr")`).
 
@@ -143,7 +149,9 @@ graph then fails only the images that use it, with `Error::Malformed(<4cc>)`).
 | other | `PropValue::Unknown` |
 
 An essential property that this crate does not know (`Unknown` with `essential = true`) makes the
-image `Unsupported` in the graph, as HEIF requires.
+image `Unsupported` in the graph, as HEIF requires. An `hvc1` or `av01` image still needs its
+`hvcC` or `av1C` in that case (else `Malformed`): libheif cannot set up its decoder without it and
+drops the item.
 
 ## Derived images (`derived.rs`)
 
@@ -233,7 +241,7 @@ pub struct Image {
     pub thumbnails: Vec<u32>,                 // thmb sources pointing at this image
     pub gain_map: Option<GainMap>,            // tmap (ISO 21496-1) or Apple aux gain map
     pub exif: Vec<u32>, pub xmp: Vec<u32>,    // cdsc items
-    pub premultiplied: bool,                  // prem
+    pub premultiplied: bool,                  // prem (this item is the source of a prem reference)
 }
 ```
 
@@ -242,9 +250,13 @@ pub struct Image {
   extents.
 - alpha: an `auxl` reference from an item whose auxC type is `urn:mpeg:mpegB:cicp:systems:auxiliary:alpha`
   or `urn:mpeg:hevc:2015:auxid:1`. depth: `urn:mpeg:hevc:2015:auxid:2` or
-  `urn:mpeg:mpegB:cicp:systems:auxiliary:depth`. Others are in `aux` only.
-- gain map: (a) ISO 21496-1: a `tmap` item with `dimg` [base, gain map] in an `altr` group with
-  the base (AVIF/libavif and HEIF); (b) Apple: an `auxl` image with aux type
+  `urn:mpeg:mpegB:cicp:systems:auxiliary:depth`. Others are in `aux` only. Only image items
+  count as sources of `auxl` and `thmb` references (libheif). A grid's alpha may live on its
+  tiles: `Image::alpha` of the grid covers only an alpha item linked to the grid itself (libheif
+  reports alpha for a grid when any tile has it, libavif when every tile has it; the oracle
+  looks at the tiles).
+- gain map: (a) ISO 21496-1: a `tmap` item with `dimg` [base, gain map] that comes before the
+  base in an `altr` group (libavif ignores a `tmap` listed after the base; AVIF/libavif and HEIF); (b) Apple: an `auxl` image with aux type
   `urn:com:apple:photo:2020:aux:hdrgainmap` (its headroom lives in the gain map's XMP; we give the
   XMP item ids). `GainMap { image: u32, tmap: Option<u32>, metadata: Option<GainMapMetadata>,
   source: GainMapSource }`.
@@ -294,8 +306,9 @@ must parse.
 
 `Heif::top_level_images() -> Vec<u32>` (ascending id), the same set as libheif's
 `heif_context_get_list_of_top_level_image_IDs`: image items (`hvc1`, `av01`, `grid`, `iovl`,
-`iden`, `tmap`, `jpeg`, `j2k1`, `unci`, `mski`, `vvc1`, `avc1`) that are not hidden and are not the
-source of a `thmb` or `auxl` reference. The parity run shows if this rule differs from libheif;
+`iden`, `jpeg`, `j2k1`, `unci`, `mski`, `vvc1`, `avc1`) that are not hidden and are not the
+source of a `thmb` or `auxl` reference. A `tmap` (gain map) item is not listed: it is an image
+for `Heif::image` but libheif has no image class for it. The parity run shows if this rule differs from libheif;
 fix the rule, not the oracle.
 
 ## Fuzz entry points

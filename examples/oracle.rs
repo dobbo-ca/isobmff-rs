@@ -14,7 +14,8 @@
 //! the library is an output line, never a panic. `unwrap` is used for output I/O only.
 //!
 //! Known gaps against libheif: a `meta` line counts the raw item bytes (libheif inflates a
-//! compressed mime item), and a non-UTF-8 item name is lossy (see docs/design.md).
+//! compressed mime item). Non-UTF-8 names are lossy on both sides (docs/parity.md). Every error
+//! also goes to stderr as `name<TAB>what: message`.
 
 use isobmff::{
     Av1c, Axis, Codec, CodecConfig, Colour, Derived, Extent, FourCc, Fraction, GainMapChannel,
@@ -216,20 +217,27 @@ impl Src<'_> {
 
 // ---- heif: graph.txt ----
 
+/// The last `nclx` (libheif keeps the last `colr` of each kind); (2, 2, 2, full range) is "no
+/// profile" in libheif.
 fn first_nclx(im: &Image) -> Option<(u16, u16, u16, bool)> {
-    im.colour.iter().find_map(|c| match c {
-        Colour::Nclx {
-            primaries,
-            transfer,
-            matrix,
-            full_range,
-        } => Some((*primaries, *transfer, *matrix, *full_range)),
-        Colour::Icc(_) => None,
-    })
+    im.colour
+        .iter()
+        .rev()
+        .find_map(|c| match c {
+            Colour::Nclx {
+                primaries,
+                transfer,
+                matrix,
+                full_range,
+            } => Some((*primaries, *transfer, *matrix, *full_range)),
+            Colour::Icc(_) => None,
+        })
+        .filter(|&n| n != (2, 2, 2, true))
 }
 
+/// The last ICC profile.
 fn first_icc(im: &Image) -> Option<Extent> {
-    im.colour.iter().find_map(|c| match c {
+    im.colour.iter().rev().find_map(|c| match c {
         Colour::Icc(e) => Some(*e),
         Colour::Nclx { .. } => None,
     })
@@ -245,10 +253,14 @@ fn image_block(o: &mut String, h: &Heif, src: &mut Src<'_>, lim: &Limits, dir: &
     } else {
         let _ = write!(o, "{}x{}", img.width, img.height);
     }
+    // libheif reports alpha for a grid when any tile has alpha.
+    let alpha = img.alpha.is_some()
+        || matches!(&img.kind, ImageKind::Grid(g)
+            if g.tiles.iter().any(|t| h.image(*t).is_ok_and(|i| i.alpha.is_some())));
     let _ = write!(
         o,
         " size={sw}x{sh} alpha={} prem={} bits=",
-        u8::from(img.alpha.is_some()),
+        u8::from(alpha),
         u8::from(img.premultiplied)
     );
     match (&img.kind, &ty) {
@@ -301,7 +313,12 @@ fn image_block(o: &mut String, h: &Heif, src: &mut Src<'_>, lim: &Limits, dir: &
 
     for a in &img.aux {
         let _ = write!(o, "aux {id} {} ", a.id);
-        esc(o, a.aux_type.as_bytes());
+        // libheif cannot open an aux image it cannot set up: no type.
+        if h.image(a.id).is_ok() {
+            esc(o, a.aux_type.as_bytes());
+        } else {
+            o.push('-');
+        }
         o.push('\n');
     }
     if let Some(d) = img.depth {
@@ -338,7 +355,8 @@ fn image_block(o: &mut String, h: &Heif, src: &mut Src<'_>, lim: &Limits, dir: &
             .tiles
             .first()
             .and_then(|t| h.image(*t).ok())
-            .map_or((0, 0), |t| (t.width, t.height));
+            .and_then(|t| t.display_size())
+            .unwrap_or((0, 0));
         let _ = write!(
             o,
             "grid {id} {}x{} tile={tw}x{th} out={}x{} tiles=",
@@ -349,7 +367,13 @@ fn image_block(o: &mut String, h: &Heif, src: &mut Src<'_>, lim: &Limits, dir: &
     }
 }
 
-fn graph(h: &Heif, src: &mut Src<'_>, lim: &Limits, dir: &Path) -> String {
+/// The error line on stderr (`name<TAB>what: message`) and the `error` output text.
+fn fail(name: &str, what: &str, e: impl std::fmt::Display) -> String {
+    eprintln!("{name}\t{what}: {e}");
+    "error\n".into()
+}
+
+fn graph(name: &str, h: &Heif, src: &mut Src<'_>, lim: &Limits, dir: &Path) -> String {
     let mut o = String::from("ok\n");
     o.push_str("brand ");
     if h.ftyp.major.0 == [0; 4] {
@@ -406,6 +430,11 @@ fn graph(h: &Heif, src: &mut Src<'_>, lim: &Limits, dir: &Path) -> String {
             }
             None => {
                 let _ = writeln!(o, "data {} error", it.id);
+                let why = it.data.as_ref().err().map_or_else(
+                    || "extent outside the file".to_string(),
+                    ToString::to_string,
+                );
+                eprintln!("{name}\tdata {}: {why}", it.id);
             }
         }
     }
@@ -436,7 +465,12 @@ fn graph(h: &Heif, src: &mut Src<'_>, lim: &Limits, dir: &Path) -> String {
                 continue;
             };
             let _ = write!(o, "prop {} {} ", it.id, k + 1);
-            fcc(&mut o, p.kind);
+            // libheif lists a property that failed to parse as type `ERR `.
+            if matches!(p.value, PropValue::Invalid) {
+                o.push_str("ERR%20");
+            } else {
+                fcc(&mut o, p.kind);
+            }
             match &p.value {
                 PropValue::Irot { angle } => {
                     let _ = write!(o, " rot={angle}");
@@ -450,7 +484,12 @@ fn graph(h: &Heif, src: &mut Src<'_>, lim: &Limits, dir: &Path) -> String {
         }
     }
 
-    for g in &h.groups {
+    // libheif only exposes `altr`, `ster` and `pymd` groups.
+    for g in h
+        .groups
+        .iter()
+        .filter(|g| [b"altr", b"ster", b"pymd"].contains(&&g.kind.0))
+    {
         o.push_str("group ");
         fcc(&mut o, g.kind);
         let _ = write!(o, " {} ", g.id);
@@ -459,46 +498,53 @@ fn graph(h: &Heif, src: &mut Src<'_>, lim: &Limits, dir: &Path) -> String {
     }
 
     for id in h.top_level_images() {
-        if let Ok(img) = h.image(id) {
-            image_block(&mut o, h, src, lim, dir, &img);
+        match h.image(id) {
+            Ok(img) => image_block(&mut o, h, src, lim, dir, &img),
+            Err(e) => eprintln!("{name}\timage {id}: {e}"),
         }
     }
     o
 }
 
-fn graph_file(path: &Path, dir: &Path, read: bool, lim: &Limits) -> String {
-    const ERR: &str = "error\n";
+fn graph_file(name: &str, path: &Path, dir: &Path, read: bool, lim: &Limits) -> String {
     let cancel = AtomicBool::new(false);
     if read {
-        let (Ok(f), Ok(f2)) = (File::open(path), File::open(path)) else {
-            return ERR.into();
+        let (f, f2) = match (File::open(path), File::open(path)) {
+            (Ok(f), Ok(f2)) => (f, f2),
+            (Err(e), _) | (_, Err(e)) => return fail(name, "open", e),
         };
-        let Ok(len) = f2.metadata().map(|m| m.len()) else {
-            return ERR.into();
+        let len = match f2.metadata() {
+            Ok(m) => m.len(),
+            Err(e) => return fail(name, "stat", e),
         };
-        let Ok(h) = isobmff::read(BufReader::new(f), lim, &cancel) else {
-            return ERR.into();
-        };
-        graph(&h, &mut Src::File(f2, len), lim, dir)
+        match isobmff::read(BufReader::new(f), lim, &cancel) {
+            Ok(h) => graph(name, &h, &mut Src::File(f2, len), lim, dir),
+            Err(e) => fail(name, "parse", e),
+        }
     } else {
-        let Ok(data) = fs::read(path) else {
-            return ERR.into();
+        let data = match fs::read(path) {
+            Ok(d) => d,
+            Err(e) => return fail(name, "open", e),
         };
-        let Ok(h) = isobmff::parse(&data, lim, &cancel) else {
-            return ERR.into();
-        };
-        graph(&h, &mut Src::Mem(&data), lim, dir)
+        match isobmff::parse(&data, lim, &cancel) {
+            Ok(h) => graph(name, &h, &mut Src::Mem(&data), lim, dir),
+            Err(e) => fail(name, "parse", e),
+        }
     }
 }
 
 fn run_heif(args: &[String]) {
     let o = opts(args);
     let [inp, out] = &o.pos[..] else { usage() };
-    let lim = limits(&o);
+    // libheif runs with its security limits off in the C oracle (libavif keeps its size limit).
+    let lim = Limits {
+        max_pixels: u64::MAX,
+        ..limits(&o)
+    };
     for (name, path) in files(inp) {
         let dir = Path::new(out).join(&name);
         fs::create_dir_all(&dir).unwrap();
-        let text = graph_file(&path, &dir, o.read, &lim);
+        let text = graph_file(&name, &path, &dir, o.read, &lim);
         fs::write(dir.join("graph.txt"), text).unwrap();
     }
 }
@@ -626,17 +672,18 @@ fn finish_gain(mut o: String, gain: Option<(u32, GainMapMetadata)>) -> String {
     o
 }
 
-fn avif_text(data: &[u8], dir: &Path, lim: &Limits) -> String {
-    const ERR: &str = "error\n";
+fn avif_text(name: &str, data: &[u8], dir: &Path, lim: &Limits) -> String {
     let cancel = AtomicBool::new(false);
-    let Ok(h) = isobmff::parse(data, lim, &cancel) else {
-        return ERR.into();
+    let h = match isobmff::parse(data, lim, &cancel) {
+        Ok(h) => h,
+        Err(e) => return fail(name, "parse", e),
     };
-    let Ok(img) = h.primary_image() else {
-        return ERR.into();
+    let img = match h.primary_image() {
+        Ok(i) => i,
+        Err(e) => return fail(name, "primary image", e),
     };
     let Some(av1c) = av1c_of(&h, &img) else {
-        return ERR.into();
+        return fail(name, "av1C", "no AV1 configuration");
     };
     let (w, hh) = match &img.kind {
         ImageKind::Grid(g) => (g.width, g.height),
@@ -649,7 +696,17 @@ fn avif_text(data: &[u8], dir: &Path, lim: &Limits) -> String {
         av1c.depth(),
         av1c.yuv_format()
     );
-    let alpha = img.alpha.is_some();
+    // libavif: a grid has alpha when every tile has an alpha item (and reads their extents).
+    let tile_alphas: Vec<u32> = match &img.kind {
+        ImageKind::Grid(g) if img.alpha.is_none() && !g.tiles.is_empty() => g
+            .tiles
+            .iter()
+            .map_while(|t| h.image(*t).ok().and_then(|i| i.alpha))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let tiles_alpha = matches!(&img.kind, ImageKind::Grid(g) if tile_alphas.len() == g.tiles.len());
+    let alpha = img.alpha.is_some() || (tiles_alpha && !tile_alphas.is_empty());
     let _ = writeln!(
         o,
         "alpha {} prem {}",
@@ -660,7 +717,7 @@ fn avif_text(data: &[u8], dir: &Path, lim: &Limits) -> String {
     match first_icc(&img).filter(|e| e.length > 0) {
         Some(e) => {
             let Some(b) = Heif::slice(data, e) else {
-                return ERR.into();
+                return fail(name, "icc", "profile outside the file");
             };
             let _ = writeln!(o, "icc {}", e.length);
             fs::write(dir.join("avif-icc.bin"), b).unwrap();
@@ -687,8 +744,9 @@ fn avif_text(data: &[u8], dir: &Path, lim: &Limits) -> String {
         if is_exif && exif_error {
             continue;
         }
-        let Ok(b) = h.item_bytes(data, it.id, lim, &cancel) else {
-            return ERR.into();
+        let b = match h.item_bytes(data, it.id, lim, &cancel) {
+            Ok(b) => b,
+            Err(e) => return fail(name, &format!("item {}", it.id), e),
         };
         if is_exif {
             let good = b.get(4..).filter(|rest| {
@@ -774,6 +832,9 @@ fn avif_text(data: &[u8], dir: &Path, lim: &Limits) -> String {
     // The merged range over the colour, alpha and gain map items (every tile of a grid).
     let mut want = vec![img.id];
     want.extend(img.alpha);
+    if tiles_alpha {
+        want.extend(&tile_alphas);
+    }
     want.extend(gain.map(|g| g.0));
     let mut acc = (0u64, 0u64);
     for id in want {
@@ -809,7 +870,7 @@ fn run_avif(args: &[String]) {
         }
         let dir = Path::new(out).join(&name);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("avif.txt"), avif_text(&data, &dir, &lim)).unwrap();
+        fs::write(dir.join("avif.txt"), avif_text(&name, &data, &dir, &lim)).unwrap();
     }
 }
 

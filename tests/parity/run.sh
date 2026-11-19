@@ -41,15 +41,16 @@ run() { "$@" || { echo "FAILED: $*" >&2; bad=1; }; }
 
 # robust <tool> <in> <out> <marker>: a batch run of a C oracle. If it fails (libheif aborting on
 # one hostile file would lose the rest of the batch), every input is run on its own, and a file
-# that kills or hangs the tool gets `crash` or `timeout` as its marker file.
+# that kills or hangs the tool gets `crash` or `timeout` as its marker file. The error lines of the
+# tool (`name<TAB>message`, on stderr) are kept in "$3.err".
 robust() {
-  timeout 3600 "$1" "$2" "$3" && return 0
+  timeout 3600 "$1" "$2" "$3" 2> "$3.err" && return 0
   echo "batch run of $1 failed, retrying every file on its own" >&2
-  rm -rf "$3" $W/one; mkdir -p "$3"
+  rm -rf "$3" $W/one; mkdir -p "$3"; : > "$3.err"
   for f in "$2"/*; do
     n=${f##*/}
     mkdir -p $W/one/in; ln "$f" "$W/one/in/$n"
-    timeout 120 "$1" $W/one/in "$3" 2>/dev/null
+    timeout 120 "$1" $W/one/in "$3" 2>> "$3.err"
     case $? in
       0) ;;
       124) mkdir -p "$3/$n"; echo timeout > "$3/$n/$4" ;;
@@ -103,24 +104,43 @@ corpus_side() {
 # mut_side <side> <marker> <dirA> <dirB> <names-file>: gate 2. Where both sides give `ok`, the
 # trees must be equal; the ok/error split is counted, not gated.
 mut_side() {
-  both=0 same=0 a_only=0 b_only=0 neither=0 skipped=0
+  both=0 same=0 known=0 a_only=0 b_only=0 neither=0 skipped=0
   : > $W/d-mut-$1
   while IFS= read -r n; do
     a=$(first "$3/$n/$2"); b=$(first "$4/$n/$2")
     if [ -z "$a" ] && [ -z "$b" ]; then skipped=$((skipped + 1)); continue; fi
     if [ "$a" = ok ] && [ "$b" = ok ]; then
       both=$((both + 1))
-      if diff -r "$3/$n" "$4/$n" > $W/d1 2>&1; then same=$((same + 1))
+      # a mutation of a file listed in known-differences.tsv for this side is not diffed
+      if awk -F'\t' -v n="${n%.*}" -v s="$1" '$1 == n && $2 == s { f = 1 } END { exit !f }' $W/known; then
+        known=$((known + 1))
+      elif diff -r "$3/$n" "$4/$n" > $W/d1 2>&1; then same=$((same + 1))
       else { echo "=== $n ($1)"; head -n 100 $W/d1; } >> $W/d-mut-$1; fi
     elif [ "$a" = ok ]; then a_only=$((a_only + 1))
     elif [ "$b" = ok ]; then b_only=$((b_only + 1))
     else neither=$((neither + 1)); fi
   done < "$5"
   {
-    echo "| $1 mutations: both ok, equal / both ok, different | $same / $((both - same)) |"
+    echo "| $1 mutations: both ok, equal / both ok, different / of a known-difference file, not diffed | $same / $((both - same - known)) / $known |"
     echo "| $1 mutations: only $6 ok / only isobmff-rs ok / both error | $a_only / $b_only / $neither |"
     [ "$skipped" -eq 0 ] || echo "| $1 mutations: not read by either tool | $skipped |"
   } >> $W/split.md
+}
+
+# errors <pair> <oracle.err> <isobmff-rs.err>: one line per file name, `name pair oracle isobmff-rs`,
+# the error lines of each side joined with " | ". The side is told by the file name, not by FNR,
+# so an empty first file does not shift the sides.
+errors() {
+  : >> "$2"; : >> "$3"
+  awk -F'\t' -v pair="$1" '
+    NF >= 2 {
+      side = (FILENAME == ARGV[1]) ? 1 : 2
+      msg = substr($0, length($1) + 2)
+      names[$1] = 1
+      if (side == 1) o[$1] = ($1 in o) ? o[$1] " | " msg : msg
+      else r[$1] = ($1 in r) ? r[$1] " | " msg : msg
+    }
+    END { for (n in names) printf "%s\t%s\t%s\t%s\n", n, pair, o[n], r[n] }' "$2" "$3" | sort
 }
 
 full() {
@@ -142,8 +162,8 @@ full() {
   mkdir -p $W/ch $W/ca $W/rh $W/ra $W/rh1 $W/rhr
   robust heif-oracle $W/all $W/ch graph.txt
   robust avif-oracle $W/all $W/ca avif.txt
-  run isobmff-oracle heif $W/all $W/rh
-  run isobmff-oracle avif $W/all $W/ra
+  run isobmff-oracle heif $W/all $W/rh 2> $W/rh.err
+  run isobmff-oracle avif $W/all $W/ra 2> $W/ra.err
   run isobmff-oracle heif --threads 1 $W/all $W/rh1
   run isobmff-oracle heif --read $W/all $W/rhr
   run isobmff-oracle stats $W/corpus $W/stats.tsv
@@ -191,6 +211,7 @@ full() {
   gate "4 coverage: corpus files >= $MIN" $W/d-cover
   [ -s $W/d-known ] && { echo; echo "known differences (not counted, docs/parity.md):"; echo; sed 's/^/    /' $W/d-known; } >> "$REP/summary.md"
   stats_table >> "$REP/summary.md"
+  { printf 'name\tpair\toracle\tisobmff-rs\n'; errors heif $W/ch.err $W/rh.err; errors avif $W/ca.err $W/ra.err; } > "$REP/errors.tsv"
 
   # the diffs: one file each in the report, and the first 200 lines in summary.md
   for d in d-heif d-avif d-stale d-mut-heif d-mut-avif d-threads d-read d-known; do

@@ -432,3 +432,63 @@ fn errors_of_a_missing_item() {
         None
     );
 }
+
+#[test]
+fn tmap_is_not_a_top_level_image() {
+    let h = go(&tmap_altr());
+    assert_eq!(h.top_level_images(), vec![1, 2]);
+}
+
+#[test]
+fn tmap_after_the_base_in_the_altr_group_is_ignored() {
+    let mut s = Spec::new(b"avif");
+    s.primary = 3;
+    let size = s.prop(ispe(64, 48));
+    let small = s.prop(ispe(32, 24));
+    let cfg = s.prop(av1c());
+    s.av1(1, size, cfg);
+    s.av1(2, small, cfg);
+    s.item(3, b"tmap").data(&tmap_payload());
+    s.link(b"dimg", 3, &[1, 2]);
+    s.group(b"altr", 100, &[1, 3]);
+    let h = go(&s.build());
+    assert!(h.image(1).unwrap().gain_map.is_none());
+}
+
+#[test]
+fn prem_is_read_from_the_source_item() {
+    let mut s = Spec::new(b"heic");
+    let size = s.prop(ispe(64, 48));
+    let cfg = s.prop(hvcc());
+    let alpha = s.prop(auxc(ALPHA));
+    s.hevc(1, size, cfg);
+    s.hevc(2, size, cfg).assoc(&[alpha]);
+    s.link(b"auxl", 2, &[1]);
+    s.link(b"prem", 1, &[2]);
+    let h = go(&s.build());
+    assert!(h.image(1).unwrap().premultiplied);
+    assert!(!h.image(2).unwrap().premultiplied);
+}
+
+#[test]
+fn essential_unknown_property_still_needs_the_codec_config() {
+    let mut s = Spec::new(b"heic");
+    let size = s.prop(ispe(64, 48));
+    let zzzz = s.prop(unknown(b"zzzz"));
+    s.item(1, b"hvc1").assoc(&[size]).essential(zzzz);
+    let h = go(&s.build());
+    assert_eq!(h.image(1).err(), Some(Error::Malformed("hvcC")));
+}
+
+#[test]
+fn thumbnails_and_aux_come_only_from_image_items() {
+    let mut s = Spec::new(b"heic");
+    let size = s.prop(ispe(64, 48));
+    let cfg = s.prop(hvcc());
+    s.hevc(1, size, cfg);
+    s.item(2, b"Exif").data(&[0; 8]);
+    s.link(b"thmb", 2, &[1]);
+    s.link(b"auxl", 2, &[1]);
+    let img = go(&s.build()).image(1).unwrap();
+    assert!(img.thumbnails.is_empty() && img.aux.is_empty());
+}

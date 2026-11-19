@@ -273,6 +273,7 @@ static int dump_one(const char *path, const char *name, void *argp)
     }
     if (!d || res != AVIF_RESULT_OK || !d->image) {
         fputs("error\n", f);
+        fprintf(stderr, "%s\t%s: %s\n", name, avifResultToString(res), d ? d->diag.error : "");
     } else {
         const avifImage *im = d->image;
         avifExtent ext;

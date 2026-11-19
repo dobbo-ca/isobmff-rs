@@ -18,6 +18,7 @@ use iinf::ItemInfo;
 use iloc::IlocItem;
 
 /// Everything `meta` holds, before the item graph is built from it.
+#[derive(Default)]
 pub(crate) struct Meta {
     /// `pitm` (0 when absent).
     pub(crate) primary: u32,

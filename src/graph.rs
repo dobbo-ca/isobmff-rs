@@ -121,8 +121,6 @@ pub struct Heif {
     fwd: Vec<(u32, u32)>,
     /// (`to` id, position in `references`), sorted.
     rev: Vec<(u32, u32)>,
-    /// (entity id, position in `groups`), sorted.
-    grp: Vec<(u32, u32)>,
 }
 
 /// The codec of a coded image.
@@ -261,7 +259,7 @@ pub struct Image {
     pub exif: Vec<u32>,
     /// XMP items that describe this image (`cdsc`), ascending id.
     pub xmp: Vec<u32>,
-    /// An alpha plane that is premultiplied (`prem` reference to this image).
+    /// The alpha plane is premultiplied (this item is the source of a `prem` reference).
     pub premultiplied: bool,
 }
 
@@ -457,18 +455,6 @@ pub(crate) fn build<F: Fetch>(
     }
     rev.sort_unstable();
     rev.dedup();
-    let mut ent_total: usize = 0;
-    for g in &groups {
-        ent_total = ent_total.saturating_add(g.entities.len());
-    }
-    let mut grp = budget.vec::<(u32, u32)>(ent_total)?;
-    for (pos, g) in groups.iter().enumerate() {
-        for &e in &g.entities {
-            grp.push((e, pos as u32));
-        }
-    }
-    grp.sort_unstable();
-    grp.dedup();
     Ok(Heif {
         ftyp,
         primary,
@@ -485,7 +471,6 @@ pub(crate) fn build<F: Fetch>(
         index,
         fwd,
         rev,
-        grp,
     })
 }
 
@@ -573,19 +558,19 @@ impl Heif {
         (exif, xmp)
     }
 
-    /// True when `a` and `b` are both in one `altr` group.
-    fn altr_together(&self, a: u32, b: u32) -> bool {
-        span(&self.grp, a).iter().any(|ea| {
-            span(&self.grp, b).iter().any(|eb| ea.1 == eb.1)
-                && usize::try_from(ea.1)
-                    .ok()
-                    .and_then(|g| self.groups.get(g))
-                    .is_some_and(|g| g.kind.0 == *b"altr")
-        })
+    /// True when `a` comes before `b` in one `altr` group (the preferred alternative first).
+    fn altr_prefers(&self, a: u32, b: u32) -> bool {
+        self.groups
+            .iter()
+            .filter(|g| g.kind.0 == *b"altr")
+            .any(|g| {
+                let p = |x| g.entities.iter().position(|&e| e == x);
+                matches!((p(a), p(b)), (Some(i), Some(j)) if i < j)
+            })
     }
 
-    /// The gain map of image `id`: a `tmap` item with `dimg` `[id, gain map]` in an `altr` group
-    /// with `id`, else an Apple `auxl` gain map.
+    /// The gain map of image `id`: a `tmap` item with `dimg` `[id, gain map]` that comes before
+    /// `id` in an `altr` group, else an Apple `auxl` gain map.
     fn gain_map(&self, id: u32, aux: &[Aux]) -> Option<GainMap> {
         for r in self.refs_to(id).filter(|r| r.kind.0 == *b"dimg") {
             let t = r.from;
@@ -597,7 +582,7 @@ impl Heif {
             };
             if let &[base, gm] = self.dimg(t).as_slice()
                 && base == id
-                && self.altr_together(t, id)
+                && self.altr_prefers(t, id)
             {
                 return Some(GainMap {
                     image: gm,
@@ -751,19 +736,25 @@ impl Heif {
         if u64::from(img.width).saturating_mul(u64::from(img.height)) > self.max_pixels {
             return Err(Error::LimitExceeded(Limit::Pixels));
         }
+        // The codec config is required even when an unknown essential property makes the image
+        // unsupported (libheif cannot set up its decoder without it).
+        let coded = match &item.item_type.0 {
+            b"hvc1" => Some(ImageKind::Coded {
+                codec: Codec::Hevc,
+                config: CodecConfig::Hevc(hvcc.ok_or(Error::Malformed("hvcC"))?),
+            }),
+            b"av01" => Some(ImageKind::Coded {
+                codec: Codec::Av1,
+                config: CodecConfig::Av1(av1c.ok_or(Error::Malformed("av1C"))?),
+            }),
+            _ => None,
+        };
         if !unknown_essential {
-            img.kind = match &item.item_type.0 {
-                b"hvc1" => ImageKind::Coded {
-                    codec: Codec::Hevc,
-                    config: CodecConfig::Hevc(hvcc.ok_or(Error::Malformed("hvcC"))?),
-                },
-                b"av01" => ImageKind::Coded {
-                    codec: Codec::Av1,
-                    config: CodecConfig::Av1(av1c.ok_or(Error::Malformed("av1C"))?),
-                },
-                b"grid" => ImageKind::Grid(self.grid(item)?),
-                b"iovl" => ImageKind::Overlay(self.overlay(item)?),
-                b"iden" => match self.dimg(id).as_slice() {
+            img.kind = match (coded, &item.item_type.0) {
+                (Some(kind), _) => kind,
+                (None, b"grid") => ImageKind::Grid(self.grid(item)?),
+                (None, b"iovl") => ImageKind::Overlay(self.overlay(item)?),
+                (None, b"iden") => match self.dimg(id).as_slice() {
                     &[input] => ImageKind::Identity { input },
                     _ => return Err(Error::Malformed("iden")),
                 },
@@ -773,6 +764,10 @@ impl Heif {
         let mut aux_ids: Vec<u32> = self
             .refs_to(id)
             .filter(|r| r.kind.0 == *b"auxl")
+            .filter(|r| {
+                self.item(r.from)
+                    .is_some_and(|it| is_image_type(it.item_type))
+            })
             .map(|r| r.from)
             .collect();
         aux_ids.sort_unstable();
@@ -797,12 +792,16 @@ impl Heif {
         img.thumbnails = self
             .refs_to(id)
             .filter(|r| r.kind.0 == *b"thmb")
+            .filter(|r| {
+                self.item(r.from)
+                    .is_some_and(|it| is_image_type(it.item_type))
+            })
             .map(|r| r.from)
             .collect();
         img.thumbnails.sort_unstable();
         img.thumbnails.dedup();
         (img.exif, img.xmp) = self.linked_metadata(id);
-        img.premultiplied = self.refs_to(id).any(|r| r.kind.0 == *b"prem");
+        img.premultiplied = self.refs_from(id).any(|r| r.kind.0 == *b"prem");
         img.gain_map = self.gain_map(id, &img.aux);
         Ok(img)
     }
@@ -821,14 +820,15 @@ impl Heif {
     }
 
     /// The ids of the top-level images, ascending: image items (`hvc1`, `av01`, `grid`, `iovl`,
-    /// `iden`, `tmap`, `jpeg`, `j2k1`, `unci`, `mski`, `vvc1`, `avc1`) that are not hidden and
-    /// are not the source of a `thmb` or `auxl` reference. The same set as libheif's
+    /// `iden`, `jpeg`, `j2k1`, `unci`, `mski`, `vvc1`, `avc1`) that are not hidden and are not
+    /// the source of a `thmb` or `auxl` reference. A `tmap` (gain map) item is not listed: it is
+    /// an image for [`image`](Self::image) but not for libheif. The same set as libheif's
     /// `heif_context_get_list_of_top_level_image_IDs`.
     pub fn top_level_images(&self) -> Vec<u32> {
         let mut ids: Vec<u32> = self
             .items
             .iter()
-            .filter(|it| is_image_type(it.item_type) && !it.hidden)
+            .filter(|it| is_image_type(it.item_type) && it.item_type.0 != *b"tmap" && !it.hidden)
             .filter(|it| {
                 !self
                     .refs_from(it.id)

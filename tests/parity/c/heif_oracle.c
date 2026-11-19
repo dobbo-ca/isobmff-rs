@@ -50,6 +50,82 @@ static void escs(FILE *f, const char *s)
     esc(f, (const unsigned char *)(s ? s : ""), s ? strlen(s) : 0);
 }
 
+/* The bytes of s as Rust's String::from_utf8_lossy gives them (one U+FFFD per maximal invalid
+ * sequence). out holds at least 3 * n bytes; returns the length written. */
+static size_t utf8_lossy(const unsigned char *s, size_t n, unsigned char *out)
+{
+    static const unsigned char repl[3] = {0xEF, 0xBF, 0xBD};
+    size_t i = 0, o = 0;
+    while (i < n) {
+        unsigned char c = s[i], lo = 0x80, hi = 0xBF;
+        size_t need = 0, k, j;
+        if (c < 0x80) {
+            out[o++] = c;
+            i++;
+            continue;
+        }
+        if (c >= 0xC2 && c <= 0xDF) {
+            need = 1;
+        } else if (c >= 0xE0 && c <= 0xEF) {
+            need = 2;
+            if (c == 0xE0) {
+                lo = 0xA0;
+            } else if (c == 0xED) {
+                hi = 0x9F;
+            }
+        } else if (c >= 0xF0 && c <= 0xF4) {
+            need = 3;
+            if (c == 0xF0) {
+                lo = 0x90;
+            } else if (c == 0xF4) {
+                hi = 0x8F;
+            }
+        }
+        j = i + 1;
+        for (k = 0; k < need; k++, j++) {
+            if (j >= n || s[j] < lo || s[j] > hi) {
+                break;
+            }
+            lo = 0x80;
+            hi = 0xBF;
+        }
+        if (need > 0 && k == need) {
+            memcpy(out + o, s + i, need + 1);
+            o += need + 1;
+        } else {
+            memcpy(out + o, repl, 3);
+            o += 3;
+        }
+        i = j;
+    }
+    return o;
+}
+
+/* A string that isobmff-rs stores as UTF-8 (item names, content types, URIs, aux types): the
+ * lossy conversion first, then esc. */
+static void escl(FILE *f, const char *s)
+{
+    size_t n = s ? strlen(s) : 0;
+    unsigned char *buf = (unsigned char *)malloc(n * 3 + 1);
+    if (!buf) {
+        escs(f, s);
+        return;
+    }
+    esc(f, buf, utf8_lossy((const unsigned char *)(s ? s : ""), n, buf));
+    free(buf);
+}
+
+/* One line on stderr, "name<TAB>what: msg", with tabs and newlines in msg replaced by spaces. */
+static void note(const char *name, const char *what, const char *msg)
+{
+    const char *p;
+    fprintf(stderr, "%s\t%s: ", name, what);
+    for (p = msg ? msg : ""; *p; p++) {
+        fputc(*p == '\t' || *p == '\n' || *p == '\r' ? ' ' : *p, stderr);
+    }
+    fputc('\n', stderr);
+}
+
 static void fcc(FILE *f, uint32_t v)
 {
     unsigned char b[4];
@@ -234,7 +310,7 @@ static int meta_list(const heif_image_handle *h, heif_item_id *v, int n)
     return heif_image_handle_get_list_of_metadata_block_IDs(h, NULL, v, n);
 }
 
-static void dump_image(FILE *f, heif_context *ctx, const char *dir, heif_item_id id)
+static void dump_image(FILE *f, const char *name, heif_context *ctx, const char *dir, heif_item_id id)
 {
     heif_image_handle *h = NULL;
     uint32_t type = heif_item_get_item_type(ctx, id);
@@ -242,8 +318,12 @@ static void dump_image(FILE *f, heif_context *ctx, const char *dir, heif_item_id
     int ispe_w, ispe_h, n, i;
     heif_color_profile_nclx *nclx = NULL;
     size_t icc_len;
+    heif_error herr = heif_context_get_image_handle(ctx, id, &h);
 
-    if (heif_context_get_image_handle(ctx, id, &h).code != heif_error_Ok || !h) {
+    if (herr.code != heif_error_Ok || !h) {
+        char what[64];
+        snprintf(what, sizeof what, "image %u", id);
+        note(name, what, herr.message);
         return;
     }
     ispe_w = heif_image_handle_get_ispe_width(h);
@@ -252,7 +332,7 @@ static void dump_image(FILE *f, heif_context *ctx, const char *dir, heif_item_id
     if (ispe_w == 0 && ispe_h == 0) {
         fputs("ispe=-", f);
     } else {
-        fprintf(f, "ispe=%dx%d", ispe_w, ispe_h);
+        fprintf(f, "ispe=%ux%u", (unsigned)ispe_w, (unsigned)ispe_h);
     }
     fprintf(f, " size=%dx%d alpha=%d prem=%d bits=", heif_image_handle_get_width(h),
             heif_image_handle_get_height(h), heif_image_handle_has_alpha_channel(h) ? 1 : 0,
@@ -296,16 +376,20 @@ static void dump_image(FILE *f, heif_context *ctx, const char *dir, heif_item_id
     for (i = 0; i < n; i++) {
         heif_image_handle *ah = NULL;
         const char *t = NULL;
+        heif_error aerr = heif_image_handle_get_auxiliary_image_handle(h, v[i], &ah);
         fprintf(f, "aux %u %u ", id, v[i]);
-        if (heif_image_handle_get_auxiliary_image_handle(h, v[i], &ah).code == heif_error_Ok && ah) {
+        if (aerr.code == heif_error_Ok && ah) {
             if (heif_image_handle_get_auxiliary_type(ah, &t).code != heif_error_Ok) {
                 t = NULL;
             }
-            escs(f, t);
+            escl(f, t);
             heif_image_handle_release_auxiliary_type(ah, &t);
             heif_image_handle_release(ah);
         } else {
-            escs(f, NULL);
+            char what[64];
+            snprintf(what, sizeof what, "aux image %u", v[i]);
+            note(name, what, aerr.message);
+            fputc('-', f);
         }
         fputc('\n', f);
     }
@@ -331,7 +415,7 @@ static void dump_image(FILE *f, heif_context *ctx, const char *dir, heif_item_id
         fprintf(f, "meta %u %u ", id, v[i]);
         escs(f, heif_image_handle_get_metadata_type(h, v[i]));
         fputc(' ', f);
-        escs(f, heif_image_handle_get_metadata_content_type(h, v[i]));
+        escl(f, heif_image_handle_get_metadata_content_type(h, v[i]));
         fprintf(f, " %zu\n", heif_image_handle_get_metadata_size(h, v[i]));
     }
     free(v);
@@ -363,7 +447,7 @@ static void dump_image(FILE *f, heif_context *ctx, const char *dir, heif_item_id
     heif_image_handle_release(h);
 }
 
-static int dump_graph(heif_context *ctx, const uint8_t *data, size_t len, const char *dir)
+static int dump_graph(const char *name, heif_context *ctx, const uint8_t *data, size_t len, const char *dir)
 {
     char path[4096];
     FILE *f;
@@ -436,22 +520,22 @@ static int dump_graph(heif_context *ctx, const uint8_t *data, size_t len, const 
         fprintf(f, "item %u ", id);
         fcc(f, type);
         fprintf(f, " hidden=%d name=", heif_item_is_item_hidden(ctx, id) ? 1 : 0);
-        escs(f, heif_item_get_item_name(ctx, id));
+        escl(f, heif_item_get_item_name(ctx, id));
         fputs(" ctype=", f);
         if (type == heif_fourcc('m', 'i', 'm', 'e') && (s = heif_item_get_mime_item_content_type(ctx, id))) {
-            escs(f, s);
+            escl(f, s);
         } else {
             fputc('-', f);
         }
         fputs(" cenc=", f);
         if (type == heif_fourcc('m', 'i', 'm', 'e') && (s = heif_item_get_mime_item_content_encoding(ctx, id))) {
-            escs(f, s);
+            escl(f, s);
         } else {
             fputc('-', f);
         }
         fputs(" uri=", f);
         if (type == heif_fourcc('u', 'r', 'i', ' ') && (s = heif_item_get_uri_item_uri_type(ctx, id))) {
-            escs(f, s);
+            escl(f, s);
         } else {
             fputc('-', f);
         }
@@ -464,7 +548,8 @@ static int dump_graph(heif_context *ctx, const uint8_t *data, size_t len, const 
         enum heif_metadata_compression comp = heif_metadata_compression_off;
         uint8_t *bytes = NULL;
         size_t blen = 0;
-        if (heif_item_get_item_data(ctx, id, &comp, &bytes, &blen).code == heif_error_Ok) {
+        heif_error derr = heif_item_get_item_data(ctx, id, &comp, &bytes, &blen);
+        if (derr.code == heif_error_Ok) {
             fprintf(f, "data %u %zu\n", id, blen);
             if (snprintf(path, sizeof path, "%s/item-%u.bin", dir, id) < (int)sizeof path) {
                 write_file(path, bytes, bytes ? blen : 0);
@@ -473,7 +558,10 @@ static int dump_graph(heif_context *ctx, const uint8_t *data, size_t len, const 
                 heif_release_item_data(ctx, &bytes);
             }
         } else {
+            char what[64];
             fprintf(f, "data %u error\n", id);
+            snprintf(what, sizeof what, "data %u", id);
+            note(name, what, derr.message);
         }
     }
 
@@ -542,7 +630,7 @@ static int dump_graph(heif_context *ctx, const uint8_t *data, size_t len, const 
             qsort(top, (size_t)n, sizeof(uint32_t), cmp_u32);
         }
         for (i = 0; i < n; i++) {
-            dump_image(f, ctx, dir, top[i]);
+            dump_image(f, name, ctx, dir, top[i]);
         }
     }
     free(top);
@@ -579,6 +667,7 @@ static int dump_one(const char *path, const char *name, void *argp)
     size_t len = 0;
     uint8_t *data;
     heif_context *ctx;
+    heif_error rerr;
     int bad = 0;
 
     if (snprintf(dir, sizeof dir, "%s/%s", arg->out, name) >= (int)sizeof dir || mkdir_p(dir) != 0) {
@@ -592,10 +681,14 @@ static int dump_one(const char *path, const char *name, void *argp)
         return 1;
     }
     data = read_file(path, &len);
-    if (!data || heif_context_read_from_file(ctx, path, NULL).code != heif_error_Ok) {
+    if (!data) {
+        note(name, "open", "cannot read the file");
+        bad = write_file(gp, "error\n", 6) != 0;
+    } else if ((rerr = heif_context_read_from_file(ctx, path, NULL)).code != heif_error_Ok) {
+        note(name, "open", rerr.message);
         bad = write_file(gp, "error\n", 6) != 0;
     } else {
-        bad = dump_graph(ctx, data, len, dir);
+        bad = dump_graph(name, ctx, data, len, dir);
     }
     free(data);
     heif_context_free(ctx);

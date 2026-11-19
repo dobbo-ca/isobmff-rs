@@ -131,7 +131,9 @@ use graph::Fetch;
 /// # Errors
 ///
 /// [`Error::UnknownFormat`] when the first box is not `ftyp`; [`Error::NoMeta`] when the file has
-/// no `meta`; [`Error::Truncated`] when a top-level box runs past the end of `data`;
+/// neither `meta` nor `moov` (a file with `moov` only parses to an empty item graph);
+/// [`Error::Truncated`] when a top-level box before `meta` runs past the end of `data` (after
+/// `meta`, an incomplete or overlong box ends the walk and item data fails per item);
 /// [`Error::Malformed`] for an invalid box (a size smaller than its header or past its parent,
 /// two `meta` boxes, a `meta` that is not version 0 or whose first child is not an `hdlr` of
 /// handler `pict`, a box that is too short for its fields, an item id that appears twice in
@@ -151,14 +153,24 @@ pub fn parse(data: &[u8], limits: &Limits, cancel: &AtomicBool) -> Result<Heif, 
     let ctx = Ctx::new(&src, &budget, limits);
     let mut boxes = Boxes::new(&ctx, 0..src.file_len, 0, true)?;
     let mut top = Top::default();
-    while let Some(h) = boxes.next_box()? {
+    loop {
+        let h = match boxes.next_box() {
+            Ok(Some(h)) => h,
+            Ok(None) => break,
+            // After `meta`, a damaged tail ends the walk (as in libheif).
+            Err(Error::Truncated) if top.meta.is_some() => break,
+            Err(e) => return Err(e),
+        };
         top.note(&h);
         if h.kind.0 == *b"ftyp" && top.ftyp.is_none() {
             top.ftyp = Some(ftyp::parse(ctx.slice(h.payload())?, &budget)?);
         }
     }
     let (ftyp, hdr, has_moov) = top.finish()?;
-    let meta = meta::parse(&ctx, &hdr)?;
+    let meta = match &hdr {
+        Some(hdr) => meta::parse(&ctx, hdr)?,
+        None => meta::Meta::default(),
+    };
     graph::build(&ctx, ftyp, has_moov, meta, &mut SliceFetch(data))
 }
 
@@ -183,13 +195,17 @@ impl Top {
         }
     }
 
-    fn finish(self) -> Result<(Ftyp, BoxHeader, bool), Error> {
+    /// `None` for the `meta` header when the file has a `moov` but no `meta` (an image sequence:
+    /// an empty item graph).
+    fn finish(self) -> Result<(Ftyp, Option<BoxHeader>, bool), Error> {
         let ftyp = self.ftyp.ok_or(Error::UnknownFormat)?;
         if self.metas > 1 {
             return Err(Error::Malformed("meta"));
         }
-        let meta = self.meta.ok_or(Error::NoMeta)?;
-        Ok((ftyp, meta, self.has_moov))
+        if self.meta.is_none() && !self.has_moov {
+            return Err(Error::NoMeta);
+        }
+        Ok((ftyp, self.meta, self.has_moov))
     }
 }
 
@@ -275,7 +291,11 @@ pub fn read<R: Read + Seek>(mut r: R, limits: &Limits, cancel: &AtomicBool) -> R
         if pos == 0 && buf.get(4..8) != Some(b"ftyp".as_slice()) {
             return Err(Error::UnknownFormat);
         }
-        let h = decode_header(buf, pos, file_len, true)?;
+        let h = match decode_header(buf, pos, file_len, true) {
+            Ok(h) => h,
+            Err(Error::Truncated) if top.meta.is_some() => break,
+            Err(e) => return Err(e),
+        };
         top.note(&h);
         if h.kind.0 == *b"ftyp" && top.ftyp.is_none() {
             let p = h.payload();
@@ -291,6 +311,15 @@ pub fn read<R: Read + Seek>(mut r: R, limits: &Limits, cancel: &AtomicBool) -> R
         pos = h.end;
     }
     let (ftyp, hdr, has_moov) = top.finish()?;
+    let Some(hdr) = hdr else {
+        return graph::build(
+            &walk,
+            ftyp,
+            has_moov,
+            meta::Meta::default(),
+            &mut ReadFetch(&mut r),
+        );
+    };
     let len = usize::try_from(hdr.end.saturating_sub(hdr.start))
         .map_err(|_| Error::LimitExceeded(Limit::MetaBytes))?;
     if len > limits.max_meta_bytes {
@@ -608,14 +637,27 @@ mod tests {
             read(Cursor::new(&ftyp[..]), &l, &c).err(),
             Some(Error::NoMeta)
         );
-        // A top-level box that runs past the end of the file.
+        // A `meta` that runs past the end of the file.
         let mut cut = sample(&[]);
-        cut.truncate(cut.len() - 3);
+        let at = cut.windows(4).position(|w| w == b"meta").unwrap();
+        cut.truncate(at + 8);
         assert_eq!(parse(&cut, &l, &c).err(), Some(Error::Truncated));
         assert_eq!(
             read(Cursor::new(&cut[..]), &l, &c).err(),
             Some(Error::Truncated)
         );
+        // After `meta`, a box that runs past the end ends the walk; the item data fails.
+        let mut cut = sample(&[]);
+        cut.truncate(cut.len() - 3);
+        let h = parse(&cut, &l, &c).unwrap();
+        assert_eq!(h.item_bytes(&cut, 2, &l, &c), Err(Error::Truncated));
+        assert_eq!(read(Cursor::new(&cut[..]), &l, &c).unwrap(), h);
+        // A `moov` without `meta` is an empty item graph.
+        let mut seq = bx(b"ftyp", b"avis\0\0\0\0avis");
+        seq.extend_from_slice(&bx(b"moov", &[]));
+        let h = parse(&seq, &l, &c).unwrap();
+        assert!(h.has_moov && h.items.is_empty() && h.primary == 0);
+        assert_eq!(read(Cursor::new(&seq[..]), &l, &c).unwrap(), h);
         // Two meta boxes.
         let mut two = sample(&[]);
         let meta_only = bx(
