@@ -25,7 +25,7 @@ charging.
 
 `.github/workflows/fuzz.yml` runs weekly, Monday 12:23 UTC (`cron: '23 12 * * 1'`), and on
 `workflow_dispatch`; never on push or pull request. Matrix over the ten targets with
-`max-parallel: 2` (x86 only: no SIMD, so no arm64 job). Each target runs
+`max-parallel: 2` (x86 only: no SIMD, so no arm64 job; the conventions ask for a fuzz-arm64 matrix, left out on purpose). Each target runs
 `cargo +nightly fuzz run --fuzz-dir tests/fuzz <target> ... -- -max_total_time=$MAX_TOTAL_TIME
 -timeout=60 -rss_limit_mb=2048 -malloc_limit_mb=512`. Crash artifacts are uploaded; the grown
 corpus is kept in the Actions cache.
@@ -43,3 +43,7 @@ gh workflow run fuzz.yml --ref <branch> -f only=tmap
 ## Fuzz hours
 
 TBD: sum of `max_total_time` x targets over the runs on `main`.
+
+Five targets (`iloc`, `iinf`, `iref`, `ipma`, `ipco`) and `derived` and `tmap` take a raw box or
+item payload, which a whole-file seed never reaches. `tests/fuzz/payload-seeds/<target>/` holds
+small hand-written payloads for them; the workflow passes that directory as an extra seed dir.

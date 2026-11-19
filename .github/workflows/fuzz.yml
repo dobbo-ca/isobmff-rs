@@ -74,7 +74,7 @@ jobs:
       - run: |
           mkdir -p corpus/${{ matrix.target }}
           docker create --name fuzz -e MAX_TOTAL_TIME -e TARGET=${{ matrix.target }} isobmff-fuzz:local \
-            sh -c 'mkdir -p tests/data/fuzz-grown && cargo +nightly fuzz run --fuzz-dir tests/fuzz $TARGET tests/fuzz/corpus/$TARGET tests/fuzz/seeds tests/data/fuzz-grown -- -max_total_time=$MAX_TOTAL_TIME -timeout=60 -rss_limit_mb=2048 -malloc_limit_mb=512'
+            sh -c 'mkdir -p tests/data/fuzz-grown tests/fuzz/payload-seeds/$TARGET && cargo +nightly fuzz run --fuzz-dir tests/fuzz $TARGET tests/fuzz/corpus/$TARGET tests/fuzz/seeds tests/fuzz/payload-seeds/$TARGET tests/data/fuzz-grown -- -max_total_time=$MAX_TOTAL_TIME -timeout=60 -rss_limit_mb=2048 -malloc_limit_mb=512'
           docker cp corpus fuzz:/src/tests/fuzz/
           docker start -a fuzz
       - if: failure()

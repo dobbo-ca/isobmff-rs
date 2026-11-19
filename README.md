@@ -38,7 +38,7 @@ let meta = heif.metadata(&file, image.id, &limits, &cancel)?; // meta.exif (TIFF
 
 ## Resource limits
 
-Every call takes `&Limits` and a cancel flag (`&AtomicBool`); there is no unlimited entry point.
+`parse`, `read`, `item_bytes` and `metadata` take `&Limits` and a cancel flag (`&AtomicBool`); there is no unlimited entry point. The `Heif` accessors (`image`, `primary_image`, `top_level_images`) work on the already-bounded graph and allocate only small uncharged results.
 Details and rationale: [docs/limits.md](docs/limits.md). 
 | Field | Default | Unit | Error (`Limit::...`) |
 |---|---|---|---|
