@@ -456,6 +456,18 @@ fn tmap_after_the_base_in_the_altr_group_is_ignored() {
 }
 
 #[test]
+fn altr_group_without_a_tmap_gives_no_gain_map() {
+    let mut s = Spec::new(b"avif");
+    let size = s.prop(ispe(64, 48));
+    let cfg = s.prop(av1c());
+    s.av1(1, size, cfg);
+    s.av1(2, size, cfg);
+    s.group(b"altr", 100, &[2, 1]);
+    let h = go(&s.build());
+    assert!(h.image(1).unwrap().gain_map.is_none());
+}
+
+#[test]
 fn prem_is_read_from_the_source_item() {
     let mut s = Spec::new(b"heic");
     let size = s.prop(ispe(64, 48));
