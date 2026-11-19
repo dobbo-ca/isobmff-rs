@@ -1,0 +1,14 @@
+[package]
+name = "isobmff"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+description = "ISO-BMFF (HEIF, HEIC, AVIF) container parser with strict resource limits: item graph, properties, gain maps, metadata. Decodes no pixels. Written for dobbo-ca; not a port."
+publish = false
+
+[dependencies]
+
+# One codegen unit, as in the other dobbo-ca crates.
+[profile.release]
+codegen-units = 1
