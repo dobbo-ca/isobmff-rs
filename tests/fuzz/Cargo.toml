@@ -1,0 +1,85 @@
+[package]
+name = "isobmff-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+isobmff = { path = "../.." }
+
+# Not part of the root package: only this crate may depend on libfuzzer-sys.
+[workspace]
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "read"
+path = "fuzz_targets/read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "boxes"
+path = "fuzz_targets/boxes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "iloc"
+path = "fuzz_targets/iloc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "iinf"
+path = "fuzz_targets/iinf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "iref"
+path = "fuzz_targets/iref.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipma"
+path = "fuzz_targets/ipma.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipco"
+path = "fuzz_targets/ipco.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "derived"
+path = "fuzz_targets/derived.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tmap"
+path = "fuzz_targets/tmap.rs"
+test = false
+doc = false
+bench = false

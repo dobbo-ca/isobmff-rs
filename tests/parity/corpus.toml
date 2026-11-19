@@ -1,0 +1,96 @@
+# The public HEIF/AVIF sets of the parity gates (docs/design.md, "Oracles and parity"). Nothing of
+# it is committed to this repo. fetch.sh makes one blobless sparse git checkout per [[source]] at
+# the pinned `commit` (a SHA, checked after the fetch) into the BuildKit cache mount
+# id=isobmff-rs-data, and puts hardlinks of the checked-out files, which are the files selected by
+# `include` minus `exclude`, under <dir>/x/<name>/<path in the repo>. `lfs = true` sources also run
+# `git lfs pull` for the included paths only.
+#
+# include / exclude: one line each, a TOML array of git sparse-checkout patterns (gitignore
+# syntax). fetch.sh anchors each at the repo root; * does not cross /, ** does.
+#
+# Counts of files per source at the pinned commit (research of 2026-11-19, from the GitHub API):
+# libavif 63, libheif 240, link-u 156, av1-avif 17, mpeg-ffc 61, nokia-conformance-extra 19,
+# mp4parse-rust 69, imazen-heic 1, aaron-rust-hdr 4: about 630. run.sh gates on PARITY_MIN_INPUTS
+# (default 600).
+#
+# Not used, on purpose: Netflix and Chimera files of av1-avif (CC BY-NC-ND), libavif
+# arc_triomphe_* (CC BY-NC), nokiatech/heif master and heif_conformance (no usable licence),
+# imazen testdata/features and testdata/synthetic (AGPL-3.0, undocumented), PhotoPrism, pillow_heif,
+# Exiv2, libvips (no licence for the data).
+
+[[source]]
+name = "libavif"
+repo = "https://github.com/AOMediaCodec/libavif"
+commit = "17bdf4c63cb7d84fc9ce4cbf47e94cff3538d93f"
+include = ["tests/data/*.avif", "tests/data/io/*.avif"]
+exclude = ["tests/data/arc_triomphe_*.avif"]
+licence = "BSD-2-Clause. tests/data/README.md:9: \"License: [same as libavif]\"; kodim: \"released by the Eastman Kodak Company for unrestricted usage\"; cosmos1650: CC BY 3.0"
+
+[[source]]
+name = "libheif"
+repo = "https://github.com/strukturag/libheif"
+commit = "12a259a5882dd99d45ec5fc77e296a3b620d1e2e"
+include = ["tests/data/*", "examples/*.heic", "examples/*.avif", "fuzzing/data/corpus/*", "fuzzing/data/sequence_corpus/*"]
+exclude = []
+licence = "COPYING:1-2: \"The library libheif is distributed under the terms of the GNU Lesser General Public License. The sample applications and the Go and C++ wrappers are distributed under the terms of the MIT License.\" (no data-specific grant)"
+
+[[source]]
+name = "link-u"
+repo = "https://github.com/link-u/avif-sample-images"
+commit = "c666a368b73006246694919b5dbcc078317af6cc"
+include = ["*.avif", "*.avifs"]
+exclude = []
+licence = "README.md:9: \"Most images are licensed under CC-BY-SA 4.0\"; red-at-12-oclock-*: \"GNU LGPL v2.1 or 2 claused BSD License\""
+
+[[source]]
+name = "av1-avif"
+repo = "https://github.com/AOMediaCodec/av1-avif"
+commit = "bf4c18d1f3971069b75e87d6ee469790589f4f09"
+include = ["testFiles/Apple/**/*.avif", "testFiles/Xiph/*.avif", "testFiles/Microsoft/bbb_4k.avif", "testFiles/Microsoft/bbb_alpha_inverted.avif"]
+exclude = []
+licence = "testFiles/Apple/license.txt: \"Content is subject to CC-BY-SA-4.0 license\"; testFiles/Xiph/COPYING: CC BY-SA 3.0 and CC BY 3.0; testFiles/Microsoft/ReadMe.md: bbb \"Creative Commons Attribution 3.0\""
+
+[[source]]
+name = "mpeg-ffc"
+repo = "https://github.com/MPEGGroup/FileFormatConformance"
+commit = "767a5bcb9fa4841d1b3bb0ca112a6e7d4c6bf067"
+lfs = true
+include = ["data/file_features/published/heif/*.heic", "data/file_features/under_consideration/cenc/*.heic"]
+exclude = []
+licence = "LICENSE:1-3: \"The Clear BSD License / Copyright (c) 2023, Apple Inc.\""
+
+# Commit on the gh-pages branch of nokiatech/heif, not on its default branch. The conformance
+# files that the MPEG repo does not have: C043..C053, C71, MIAF*.
+[[source]]
+name = "nokia-conformance-extra"
+repo = "https://github.com/nokiatech/heif"
+commit = "f01283f3e64ccc6e6ab489bd556d454879069185"
+include = ["content/conformance/C04[3-9].heic", "content/conformance/C05[0-3].heic", "content/conformance/C71.heic", "content/conformance/MIAF*.heic"]
+exclude = []
+licence = "CONTENT-LICENSES.md section 7: \"Freely redistributable for conformance testing and demonstration.\""
+
+[[source]]
+name = "mp4parse-rust"
+repo = "https://github.com/mozilla/mp4parse-rust"
+commit = "d3a9abfc93b22687e5e5cd9df86697adcb7d5887"
+include = ["mp4parse/tests/**/*.avif", "mp4parse_capi/tests/*.avif"]
+exclude = []
+licence = "repository licence MPL-2.0 (no data-specific statement)"
+
+# Only the Apple HDR gain map sample, which testdata/README.md licenses separately.
+[[source]]
+name = "imazen-heic"
+repo = "https://github.com/imazen/heic"
+commit = "4d72caddb4c1d664237a8d3693f35d69ac80caaf"
+include = ["testdata/apple-hdr/*.heic"]
+exclude = []
+licence = "testdata/README.md, apple-hdr: \"Licensed under the MIT License\""
+
+[[source]]
+name = "aaron-rust-hdr"
+repo = "https://github.com/aaron-rust/hdr-sample-images"
+commit = "df0d5df406ad0dbe2124d6f2a3700fe73dd3ead7"
+lfs = true
+include = ["different_file_formats_in_sdr_and_hdr/2A*.avif", "different_file_formats_in_sdr_and_hdr/2B*.avif", "different_file_formats_in_sdr_and_hdr/3A*.heic", "different_file_formats_in_sdr_and_hdr/3B*.heic"]
+exclude = []
+licence = "README.md:31: \"All image files in this repository are licensed under the Creative Commons Zero (CC0) license\""

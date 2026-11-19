@@ -1,0 +1,57 @@
+isobmff-rs
+Copyright 2026 Chris Dobbyn
+
+isobmff-rs is a new crate, not a port of one repository. It parses the ISO base media file
+format (HEIF, HEIC, AVIF) from the published layouts of ISO/IEC 14496-12, ISO/IEC 23008-12, the
+AVIF and AV1-ISOBMFF specifications, and ISO/IEC 21496-1. docs/design.md describes the design.
+
+Third-party code and data
+-------------------------
+
+1. libavif 1.4.2 (BSD 2-Clause), github.com/AOMediaCodec/libavif at c5240fc.
+
+   Ported rule: Clap::crop in src/props/image.rs follows avifCropRectFromCleanApertureBox in
+   src/avif.c (the exact-fraction clean aperture to crop rectangle rule, including its checks:
+   positive denominators below 2^31, integer clap width and height, integer and non-negative left
+   and top edges, a rectangle inside the image). The gain map payload checks of
+   src/derived.rs (non-zero denominators, max not below min, non-zero gamma, no trailing bytes
+   for writer version 0) follow src/gainmap.c and the tmap reader in src/read.c.
+   libavif also runs as a CI oracle (tests/parity/c/avif_oracle.c); it is not linked into the
+   crate.
+
+   Licence text:
+
+       Copyright 2019 Joe Drago. All rights reserved.
+
+       Redistribution and use in source and binary forms, with or without
+       modification, are permitted provided that the following conditions are met:
+
+       1. Redistributions of source code must retain the above copyright notice, this
+       list of conditions and the following disclaimer.
+
+       2. Redistributions in binary form must reproduce the above copyright notice,
+       this list of conditions and the following disclaimer in the documentation
+       and/or other materials provided with the distribution.
+
+       THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+       AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+       IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+       DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+       FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+       DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+       SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+       CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+       OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+       OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+2. libheif 1.23.7 (LGPL-3.0), github.com/strukturag/libheif at 12a259a.
+
+   Used only as a CI oracle (built from source, tests/parity/c/heif_oracle.c) and as a design
+   reference for which structures to read. No libheif code is copied or linked, and libheif is
+   not a dependency of the crate or part of anything it ships.
+
+3. libultrahdr (MIT or Apache-2.0): the common-denominator layout of the ISO 21496-1 payload
+   (flag bit 3) was read from lib/src/gainmapmetadata.cpp; no code is copied.
+
+4. Test corpus (fetched in CI, never stored in this repository): the sources and licences are
+   listed in tests/parity/corpus.toml.
