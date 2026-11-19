@@ -55,7 +55,7 @@
 //!
 //! # Resource limits
 //!
-//! Every entry point takes [`Limits`] and a cancel flag (`&AtomicBool`).
+//! `parse`, `read`, `item_bytes` and `metadata` take [`Limits`] and a cancel flag (`&AtomicBool`); the `Heif` graph accessors work on the already-bounded graph.
 //!
 //! - `max_alloc` (default 256 MiB) is the enforced peak of the working memory of one call: each
 //!   buffer whose size comes from the input (items, properties, references, extents, the copy of
@@ -610,6 +610,20 @@ mod tests {
             h.metadata(&file, 1, &small, &c),
             Err(Error::LimitExceeded(Limit::MetadataBytes))
         );
+    }
+
+    #[test]
+    fn unknown_meta_children_are_kept_as_ranges() {
+        let (l, c) = lim();
+        let ipro = bx(b"ipro", &[0, 0, 0, 0, 0, 0]);
+        let file = sample(&ipro);
+        let h = parse(&file, &l, &c).unwrap();
+        assert_eq!(h.other_boxes.len(), 1);
+        let (kind, e) = h.other_boxes[0];
+        assert_eq!(kind, FourCc(*b"ipro"));
+        assert_eq!(Heif::slice(&file, e), Some(&ipro[..]));
+        assert_eq!(read(Cursor::new(&file[..]), &l, &c).unwrap(), h);
+        assert!(parse(&sample(&[]), &l, &c).unwrap().other_boxes.is_empty());
     }
 
     #[test]

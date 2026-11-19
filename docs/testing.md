@@ -22,6 +22,6 @@ equal the default; a minimum input count (`PARITY_MIN_INPUTS`).
 - `test`: fmt, clippy `-D warnings`, `cargo test`. Runs on pull requests; the required check.
 - `arm64`: `cargo test` under qemu. No SIMD, so it checks arithmetic on a second target.
 - `parity`, `parity-arm64`: the oracle gates.
-- `fuzz` (`fuzz.yml`) and `bench` (`bench.yml`): weekly and information only.
+- `fuzz` (`fuzz.yml`): weekly (Monday 12:23 UTC) and on dispatch. `bench` (`bench.yml`): on push to main and on dispatch. Both are information only.
 
 The crate is done when `arm64`, `parity` and `parity-arm64` are green on `main`.

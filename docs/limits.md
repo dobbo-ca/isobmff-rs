@@ -1,6 +1,6 @@
 # Limits
 
-Every public function takes `&Limits` and a cancel flag. Each cap has its own `Limit` variant;
+`parse`, `read`, `item_bytes` and `metadata` take `&Limits` and a cancel flag; the `Heif` graph accessors do not (they work on the bounded graph). Each cap has its own `Limit` variant;
 exceeding it gives `Error::LimitExceeded(Limit::X)` (`Error::class()`: `limit-` plus the kebab-case
 name, for example `limit-grid-tiles`). Allocations from input sizes are charged to `max_alloc`
 before they happen (`Budget::vec`).
@@ -17,7 +17,7 @@ before they happen (`Budget::vec`).
 | `max_extents` | 1 000 000 | iloc extents, all items together | max_iloc_extents_per_item 32 |
 | `max_grid_tiles` | 65 536 | rows x columns of a grid; inputs of an iovl | max_number_of_tiles 4096 x 4096 |
 | `max_pixels` | 1 << 30 | ispe, grid and iovl width x height | max_image_size_pixels 32768 x 32768 |
-| `max_meta_bytes` | 64 MiB | size of the `meta` box that `read` copies | - |
+| `max_meta_bytes` | 64 MiB | size of the `meta` box (and of the `ftyp` payload) that `read` copies; `parse` has no such cap | - |
 | `max_metadata_bytes` | 64 MiB | one Exif or XMP item returned by `metadata()` | max_memory_block_size 4 GiB |
 
 ## Why these values
@@ -39,14 +39,14 @@ reference cap to 16, which rejects iPhone files with many `dimg` references (lib
 ## Corpus maxima
 
 The parity run (`summary.md`, from `oracle stats`) prints the largest value in the corpus for each
-count. To be filled after the first parity run on `main`.
+count (parity run, 643 files).
 
 | Count | Corpus maximum | Limit |
 |---|---|---|
-| items | TBD | 65 535 |
-| references (one iref entry) | TBD | 1 000 000 (all boxes together) |
-| grid tiles | TBD | 65 536 |
-| extents (one item) | TBD | 1 000 000 (all items together) |
-| boxes | TBD | 1 000 000 |
-| box depth | TBD | 32 |
-| properties | TBD | 65 535 |
+| items | 51 | 65 535 |
+| references (one iref entry) | 48 | 1 000 000 (all boxes together) |
+| grid tiles | 48 | 65 536 |
+| extents (one item) | 2 | 1 000 000 (all items together) |
+| boxes | 77 | 1 000 000 |
+| box depth | 3 | 32 |
+| properties | 14 | 65 535 |

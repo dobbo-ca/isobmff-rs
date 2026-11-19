@@ -39,6 +39,10 @@ RUN --mount=type=cache,id=isobmff-rs-target-ci,sharing=locked,target=/src/target
     find src examples tests -name '*.rs' -exec touch {} + && cargo test --locked --no-fail-fast
 RUN --mount=type=cache,id=isobmff-rs-target-ci,sharing=locked,target=/src/target \
     find src examples tests -name '*.rs' -exec touch {} + && RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
+# The fuzz crate is its own workspace, so the root checks above skip it.
+RUN find src examples tests -name '*.rs' -exec touch {} + \
+    && cargo fmt --manifest-path tests/fuzz/Cargo.toml --check \
+    && cargo check --locked --manifest-path tests/fuzz/Cargo.toml
 # The examples are built too, so the cross linker runs (a lib alone is not linked).
 RUN --mount=type=cache,id=isobmff-rs-target-ci,sharing=locked,target=/src/target \
     find src examples tests -name '*.rs' -exec touch {} + && cargo build --locked --release --target aarch64-unknown-linux-gnu --examples

@@ -492,3 +492,38 @@ fn thumbnails_and_aux_come_only_from_image_items() {
     let img = go(&s.build()).image(1).unwrap();
     assert!(img.thumbnails.is_empty() && img.aux.is_empty());
 }
+
+#[test]
+fn the_first_property_of_a_type_wins() {
+    let mut s = Spec::new(b"heic");
+    let size = s.prop(ispe(64, 48));
+    let cfg = s.prop(hvcc());
+    let (p1, p2) = (s.prop(pasp(1, 1)), s.prop(pasp(2, 1)));
+    let (x1, x2) = (s.prop(pixi(&[8, 8, 8])), s.prop(pixi(&[10, 10, 10])));
+    s.hevc(1, size, cfg).assoc(&[p1, p2, x1, x2]);
+    let img = go(&s.build()).image(1).unwrap();
+    assert_eq!(img.pasp, Some((1, 1)));
+    assert_eq!(img.pixi.as_deref(), Some(&[8u8, 8, 8][..]));
+}
+
+#[test]
+fn avc_alpha_urn_is_alpha() {
+    let mut s = Spec::new(b"heic");
+    let size = s.prop(ispe(64, 48));
+    let alpha = s.prop(auxc("urn:mpeg:avc:2015:auxid:1"));
+    s.item(1, b"avc1").assoc(&[size]);
+    s.item(2, b"avc1").assoc(&[size, alpha]);
+    s.link(b"auxl", 2, &[1]);
+    assert_eq!(go(&s.build()).image(1).unwrap().alpha, Some(2));
+}
+
+#[test]
+fn a_grid_payload_over_12_bytes_is_malformed_without_a_parse() {
+    let mut s = Spec::new(b"heic");
+    s.item(1, b"grid").data(&[0; 13]);
+    let h = go(&s.build());
+    assert_eq!(
+        h.item(1).unwrap().derived,
+        Some(Err(Error::Malformed("grid")))
+    );
+}

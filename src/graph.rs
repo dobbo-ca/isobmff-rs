@@ -1,6 +1,7 @@
 //! The item graph: items, references and properties joined into [`Image`]s.
 
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -16,10 +17,15 @@ use crate::{Error, Extent, FourCc, Limit, Limits};
 
 /// The largest payload of a `grid`, `iovl` or `tmap` item that is read while the graph is built.
 const DERIVED_MAX: usize = 4 << 20;
+/// The most payload bytes read for all derived items of one graph (iloc lets items share bytes).
+const DERIVED_TOTAL_MAX: usize = 64 << 20;
+/// The longest valid `grid` payload.
+const GRID_MAX: usize = 12;
 
-const ALPHA_TYPES: [&str; 2] = [
+const ALPHA_TYPES: [&str; 3] = [
     "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha",
     "urn:mpeg:hevc:2015:auxid:1",
+    "urn:mpeg:avc:2015:auxid:1",
 ];
 const DEPTH_TYPES: [&str; 2] = [
     "urn:mpeg:mpegB:cicp:systems:auxiliary:depth",
@@ -85,6 +91,8 @@ pub struct Item {
     pub uri_type: String,
     /// `infe` flags bit 0.
     pub hidden: bool,
+    /// `item_protection_index` of the `infe` (0: not protected).
+    pub protection_index: u16,
     /// The absolute file extents of the item data, or why they cannot be had. Bytes of an item
     /// with an error are an error only when requested.
     pub data: Result<Vec<Extent>, ItemError>,
@@ -113,6 +121,9 @@ pub struct Heif {
     pub references: Vec<Reference>,
     /// Every entity group of `grpl`, in file order.
     pub groups: Vec<EntityGroup>,
+    /// Every other child of `meta` (`ipro`, `dinf`, unknown boxes) as (type, whole-box range), in
+    /// file order. Kept so a caller can copy or inspect them; not parsed.
+    pub other_boxes: Vec<(FourCc, Extent)>,
     /// The file has a top-level `moov` box (not parsed in this version).
     pub has_moov: bool,
     /// Box counts of the parse.
@@ -337,6 +348,7 @@ fn derive<F: Fetch>(
     fetch: &mut F,
     kind: FourCc,
     data: &Result<Vec<Extent>, ItemError>,
+    spent: &mut usize,
 ) -> Result<Option<Result<Derived, Error>>, Error> {
     let what = match &kind.0 {
         b"grid" => "grid",
@@ -352,7 +364,8 @@ fn derive<F: Fetch>(
     for e in extents {
         total = total.saturating_add(usize::try_from(e.length).unwrap_or(usize::MAX));
     }
-    if total > DERIVED_MAX {
+    *spent = spent.saturating_add(total);
+    if total > DERIVED_MAX || (what == "grid" && total > GRID_MAX) || *spent > DERIVED_TOTAL_MAX {
         return Ok(Some(Err(Error::Malformed(what))));
     }
     let mut buf = ctx.budget.vec::<u8>(total)?;
@@ -390,6 +403,7 @@ pub(crate) fn build<F: Fetch>(
         props,
         mut assoc,
         groups,
+        other,
     } = meta;
     locs.sort_unstable_by_key(|i| i.id);
     if locs.windows(2).any(|w| matches!(w, [a, b] if a.id == b.id)) {
@@ -409,6 +423,7 @@ pub(crate) fn build<F: Fetch>(
         return Err(Error::Malformed("iinf"));
     }
     let mut items = budget.vec::<Item>(n)?;
+    let mut derived_spent = 0usize;
     for info in infos {
         budget.check_cancel()?;
         let (construction_method, data) = match locs.binary_search_by_key(&info.id, |i| i.id) {
@@ -428,7 +443,7 @@ pub(crate) fn build<F: Fetch>(
                 .unwrap_or_default(),
             Err(_) => Vec::new(),
         };
-        let derived = derive(ctx, fetch, info.item_type, &data)?;
+        let derived = derive(ctx, fetch, info.item_type, &data, &mut derived_spent)?;
         items.push(Item {
             id: info.id,
             item_type: info.item_type,
@@ -437,6 +452,7 @@ pub(crate) fn build<F: Fetch>(
             content_encoding: info.content_encoding,
             uri_type: info.uri_type,
             hidden: info.hidden,
+            protection_index: info.protection_index,
             data,
             construction_method,
             associations,
@@ -465,6 +481,7 @@ pub(crate) fn build<F: Fetch>(
         properties: props,
         references: refs,
         groups,
+        other_boxes: other,
         has_moov,
         stats: Stats {
             boxes: ctx.boxes.get(),
@@ -561,40 +578,56 @@ impl Heif {
         (exif, xmp)
     }
 
-    /// True when `a` comes before `b` in one `altr` group (the preferred alternative first).
-    fn altr_prefers(&self, a: u32, b: u32) -> bool {
-        self.groups
-            .iter()
-            .filter(|g| g.kind.0 == *b"altr")
-            .any(|g| {
-                let p = |x| g.entities.iter().position(|&e| e == x);
-                matches!((p(a), p(b)), (Some(i), Some(j)) if i < j)
-            })
-    }
-
     /// The gain map of image `id`: a `tmap` item with `dimg` `[id, gain map]` that comes before
     /// `id` in an `altr` group, else an Apple `auxl` gain map.
+    ///
+    /// Each `tmap` is looked at once and each `altr` group is scanned once, so the work is linear
+    /// in the references and group entities however they are repeated.
     fn gain_map(&self, id: u32, aux: &[Aux]) -> Option<GainMap> {
+        let mut seen = HashSet::new();
+        let mut cands = Vec::new();
         for r in self.refs_to(id).filter(|r| r.kind.0 == *b"dimg") {
             let t = r.from;
+            if !seen.insert(t) {
+                continue;
+            }
             let Some(item) = self.item(t).filter(|i| i.item_type.0 == *b"tmap") else {
                 continue;
             };
             let Some(Ok(Derived::Tmap(metadata))) = &item.derived else {
                 continue;
             };
-            if let &[base, gm] = self.dimg(t).as_slice()
+            let mut ids = self
+                .refs_from(t)
+                .filter(|r| r.kind.0 == *b"dimg")
+                .flat_map(|r| r.to.iter().copied());
+            if let (Some(base), Some(gm), None) = (ids.next(), ids.next(), ids.next())
                 && base == id
-                && self.altr_prefers(t, id)
             {
-                return Some(GainMap {
-                    image: gm,
-                    tmap: Some(t),
-                    metadata: *metadata,
-                    source: GainMapSource::Tmap,
-                    xmp: Vec::new(),
-                });
+                cands.push((t, gm, *metadata));
             }
+        }
+        let idx: HashMap<u32, usize> = cands.iter().enumerate().map(|(i, c)| (c.0, i)).collect();
+        // The first candidate (in reference order) that precedes `id` in some `altr` group.
+        let mut best: Option<usize> = None;
+        for g in self.groups.iter().filter(|g| g.kind.0 == *b"altr") {
+            let Some(pid) = g.entities.iter().position(|&e| e == id) else {
+                continue;
+            };
+            for &e in g.entities.iter().take(pid) {
+                if let Some(&i) = idx.get(&e) {
+                    best = Some(best.map_or(i, |b| b.min(i)));
+                }
+            }
+        }
+        if let Some(&(t, gm, metadata)) = best.and_then(|i| cands.get(i)) {
+            return Some(GainMap {
+                image: gm,
+                tmap: Some(t),
+                metadata,
+                source: GainMapSource::Tmap,
+                xmp: Vec::new(),
+            });
         }
         let a = aux.iter().find(|a| &*a.aux_type == APPLE_GAIN_MAP)?;
         Some(GainMap {
@@ -707,7 +740,12 @@ impl Heif {
                         (img.width, img.height) = (*width, *height);
                     }
                 }
-                PropValue::Pixi { bits } => img.pixi = Some(bits.clone()),
+                // The first property of a type wins, as in libheif and libavif.
+                PropValue::Pixi { bits } => {
+                    if img.pixi.is_none() {
+                        img.pixi = Some(bits.clone());
+                    }
+                }
                 PropValue::Colr(c) => img.colour.push(*c),
                 PropValue::Irot { angle } => img.transforms.push(Transform::Rotate(*angle)),
                 PropValue::Imir { axis } => img.transforms.push(Transform::Mirror(*axis)),
@@ -715,21 +753,29 @@ impl Heif {
                 PropValue::Pasp {
                     h_spacing,
                     v_spacing,
-                } => img.pasp = Some((*h_spacing, *v_spacing)),
+                } => {
+                    if img.pasp.is_none() {
+                        img.pasp = Some((*h_spacing, *v_spacing));
+                    }
+                }
                 PropValue::Lsel { layer_id } => {
-                    layer.layer_id = Some(*layer_id);
+                    layer.layer_id.get_or_insert(*layer_id);
                     has_layer = true;
                 }
                 PropValue::A1op { op_index } => {
-                    layer.op_index = Some(*op_index);
+                    layer.op_index.get_or_insert(*op_index);
                     has_layer = true;
                 }
                 PropValue::A1lx { sizes } => {
-                    layer.sizes = Some(*sizes);
+                    layer.sizes.get_or_insert(*sizes);
                     has_layer = true;
                 }
-                PropValue::Hvcc(h) => hvcc = Some(Arc::clone(h)),
-                PropValue::Av1c(v) => av1c = Some(*v),
+                PropValue::Hvcc(h) => {
+                    hvcc.get_or_insert_with(|| Arc::clone(h));
+                }
+                PropValue::Av1c(v) => {
+                    av1c.get_or_insert(*v);
+                }
                 PropValue::AuxC { .. } | PropValue::Other => {}
                 PropValue::Unknown => unknown_essential |= a.essential,
                 // libheif treats these as optional: the image keeps going without them

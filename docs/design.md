@@ -102,7 +102,7 @@ General ISO-BMFF reader, also for the later MP4/MOV work (`moov/trak/mdia/minf/s
 | Box | Versions | Kept |
 |---|---|---|
 | `pitm` | 0 (u16 id), 1 (u32 id) | `primary` |
-| `iinf` | 0 (u16 count), 1 (u32 count) | the first entry_count children; non-`infe` skipped; fewer is Malformed |
+| `iinf` | 0 (u16 count), any other version (u32 count, as libheif) | the first entry_count children; non-`infe` skipped; fewer is Malformed |
 | `infe` | 2 (u16 id), 3 (u32 id); 0/1 accepted, kept as item type `\0\0\0\0` | id, protection index, item_type, item_name, `mime`: content_type + content_encoding, `uri `: uri_type; `hidden` = flags & 1 |
 | `iloc` | 0, 1, 2 | per item: construction method, data_reference_index, base_offset, extents |
 | `idat` | - | payload range, for construction method 1 |
@@ -215,7 +215,7 @@ pub struct Heif {
     pub stats: Stats,               // boxes visited, max depth
 }
 pub struct Item { pub id: u32, pub item_type: FourCc, pub name: String, pub content_type: String,
-                  pub content_encoding: String, pub uri_type: String, pub hidden: bool,
+                  pub content_encoding: String, pub uri_type: String, pub hidden: bool, pub protection_index: u16,
                   pub data: Result<Vec<Extent>, ItemError>, pub construction_method: u8,
                   pub associations: Vec<Association>,
                   pub derived: Option<Result<Derived, Error>> }  // grid / iovl / tmap payload
@@ -251,7 +251,7 @@ pub struct Image {
   `unci`, `hvt1`...) are `Unsupported(type)`. `config` is the parsed hvcC/av1C, `data` the item
   extents.
 - alpha: an `auxl` reference from an item whose auxC type is `urn:mpeg:mpegB:cicp:systems:auxiliary:alpha`
-  or `urn:mpeg:hevc:2015:auxid:1`. depth: `urn:mpeg:hevc:2015:auxid:2` or
+  `urn:mpeg:hevc:2015:auxid:1` or `urn:mpeg:avc:2015:auxid:1`. depth: `urn:mpeg:hevc:2015:auxid:2` or
   `urn:mpeg:mpegB:cicp:systems:auxiliary:depth`. Others are in `aux` only. Only image items
   count as sources of `auxl` and `thmb` references (libheif). A grid's alpha may live on its
   tiles: `Image::alpha` of the grid covers only an alpha item linked to the grid itself (libheif
@@ -358,5 +358,5 @@ Spec of the oracle output: docs/parity.md. Summary:
 
 The item graph exposes and keeps every item, property, reference and entity group: Exif, XMP,
 ICC and nclx, gain-map items, depth, thumbnails, and unknown items and properties as raw byte
-ranges. Nothing is dropped while parsing. v1 writes no files; any later API that writes or
+ranges. Every other child of `meta` (`ipro`, `dinf`, unknown boxes) is kept as a (type, whole-box range) in `Heif::other_boxes`, and the protection index of each item is kept. Dropped while parsing: unknown children of `iprp`, `iloc` entries with no `infe`, and `ipma` entries for unknown ids (none of these is reachable from an item). v1 writes no files; any later API that writes or
 filters a file keeps all of these by default and drops them only on an explicit option.

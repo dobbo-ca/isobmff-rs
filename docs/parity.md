@@ -91,7 +91,7 @@ Only for files whose `ftyp` major or compatible brands include `avif`. Decoder s
 size <w>x<h> depth=<8|10|12> yuv=<444|422|420|400>
 alpha <0|1> prem <0|1>
 icc <len>                                    bytes in avif-icc.bin when len > 0
-exif <len>                                   TIFF bytes (offset header removed) in avif-exif.bin
+exif <len>                                   bytes after the 4-byte exif_tiff_header_offset (libavif) in avif-exif.bin
 xmp <len>                                    bytes in avif-xmp.bin
 irot <deg>|-
 imir <axis>|-
@@ -144,3 +144,12 @@ per item, boxes, depth) that docs/limits.md cites, and the first 200 diff lines.
 largest reference count of one iref entry, largest grid (tiles), largest extent count of one
 item, properties. isobmff-rs exposes these as `Heif::stats` (`Stats { boxes, max_depth }`) plus
 counts of the public vectors. run.sh puts the maxima in summary.md.
+
+## Not gated
+
+- `Heif::metadata()` (TIFF offset stripping, first `cdsc` by ascending id) has no oracle line: the
+  avif oracle rebuilds libavif's Exif rules from `item_bytes` (all bytes after the 4-byte field,
+  so the usual `Exif\0\0` prefix stays), and the heif oracle does not call it. Unit tests cover it.
+- An `iloc` extent with `extent_length` 0 is read here as "to the end of the file" (method 0) or
+  of `idat` (method 1), as ISO 14496-12 says. libheif and libavif read zero bytes. No corpus file
+  has one.

@@ -16,6 +16,7 @@ pub(crate) struct ItemInfo {
     pub(crate) content_encoding: String,
     pub(crate) uri_type: String,
     pub(crate) hidden: bool,
+    pub(crate) protection_index: u16,
 }
 
 /// Parses one `infe` payload (starting at its version byte).
@@ -30,11 +31,12 @@ pub(crate) fn parse_infe(bytes: &[u8], budget: &Budget<'_>) -> Result<ItemInfo, 
         content_encoding: String::new(),
         uri_type: String::new(),
         hidden: flags & 1 != 0,
+        protection_index: 0,
     };
     match version {
         0 | 1 => {
             info.id = u32::from(c.u16()?);
-            c.skip(2)?; // item_protection_index
+            info.protection_index = c.u16()?;
             info.name = budget.string(c.cstr())?;
             info.content_type = budget.string(c.cstr())?;
             info.content_encoding = budget.string(c.cstr())?;
@@ -45,7 +47,7 @@ pub(crate) fn parse_infe(bytes: &[u8], budget: &Budget<'_>) -> Result<ItemInfo, 
             } else {
                 c.u32()?
             };
-            c.skip(2)?; // item_protection_index
+            info.protection_index = c.u16()?;
             info.item_type = c.fourcc()?;
             info.name = budget.string(c.cstr())?;
             match &info.item_type.0 {
@@ -72,12 +74,12 @@ pub(crate) fn parse(
     let (version, _, rest) = full_header("iinf", bytes)?;
     let mut c = Cur::new("iinf", rest, 0);
     let (count, head) = match version {
+        // libheif reads a u32 count for any version above 0 (box.cc:2650).
         0 => (usize::from(c.u16()?), 6u64),
-        1 => (
+        _ => (
             usize::try_from(c.u32()?).map_err(|_| Error::Malformed("iinf"))?,
             8u64,
         ),
-        _ => return Err(Error::Malformed("iinf")),
     };
     if count > ctx.limits.max_items {
         return Err(Error::LimitExceeded(Limit::Items));
@@ -105,6 +107,7 @@ pub(crate) fn parse(
 mod tests {
     use super::*;
     use crate::Limits;
+    use crate::boxes::Src;
     use std::sync::atomic::AtomicBool;
 
     fn budget() -> (Limits, AtomicBool) {
@@ -157,5 +160,35 @@ mod tests {
         let b = Budget::new(&l, &c);
         assert!(parse_infe(&[2, 0, 0, 0, 0, 1], &b).is_err());
         assert!(parse_infe(&[9, 0, 0, 0, 0, 1, 0, 0], &b).is_err());
+    }
+
+    #[test]
+    fn infe_keeps_the_protection_index() {
+        let (l, c) = budget();
+        let b = Budget::new(&l, &c);
+        let mut p = vec![2, 0, 0, 0, 0, 7, 0, 5];
+        p.extend_from_slice(b"hvc1\0");
+        assert_eq!(parse_infe(&p, &b).unwrap().protection_index, 5);
+    }
+
+    #[test]
+    fn iinf_of_any_version_above_0_has_a_u32_count() {
+        let (l, c) = budget();
+        let b = Budget::new(&l, &c);
+        let infe = b"\0\0\0\x15infe\x02\0\0\0\0\x01\0\0hvc1\0";
+        for version in [1u8, 2, 3] {
+            let mut p = vec![version, 0, 0, 0, 0, 0, 0, 1];
+            p.extend_from_slice(infe);
+            let len = p.len() as u64;
+            let src = Src {
+                bytes: &p,
+                base: 0,
+                file_len: len,
+            };
+            let ctx = Ctx::new(&src, &b, &l);
+            let items = parse(&ctx, 0..len, 1).unwrap();
+            assert_eq!(items.len(), 1, "version {version}");
+            assert_eq!(items[0].id, 1, "version {version}");
+        }
     }
 }

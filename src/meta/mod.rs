@@ -12,7 +12,7 @@ pub use iref::Reference;
 
 use crate::boxes::{BoxHeader, Boxes, Ctx, Cur, full_header};
 use crate::props::Property;
-use crate::{Error, Extent};
+use crate::{Error, Extent, FourCc};
 
 use iinf::ItemInfo;
 use iloc::IlocItem;
@@ -31,6 +31,8 @@ pub(crate) struct Meta {
     /// Associations per item id, in file order.
     pub(crate) assoc: iprp::Entries,
     pub(crate) groups: Vec<EntityGroup>,
+    /// Every other child of `meta` (`ipro`, `dinf`, unknown boxes): type and whole-box range.
+    pub(crate) other: Vec<(FourCc, Extent)>,
 }
 
 fn once<T>(slot: &mut Option<T>, v: T, what: &'static str) -> Result<(), Error> {
@@ -60,6 +62,7 @@ pub(crate) fn parse(ctx: &Ctx<'_>, hdr: &BoxHeader) -> Result<Meta, Error> {
     let mut iprp: Option<(Vec<Property>, iprp::Entries)> = None;
     let mut groups: Option<Vec<EntityGroup>> = None;
     let mut ids: usize = 0;
+    let mut other: Vec<(FourCc, Extent)> = Vec::new();
     while let Some(h) = boxes.next_box()? {
         let p = h.payload();
         if first {
@@ -99,7 +102,18 @@ pub(crate) fn parse(ctx: &Ctx<'_>, hdr: &BoxHeader) -> Result<Meta, Error> {
             b"iref" => once(&mut refs, iref::parse(ctx, p, 1, &mut ids)?, "iref")?,
             b"iprp" => once(&mut iprp, iprp::parse(ctx, p, 1)?, "iprp")?,
             b"grpl" => once(&mut groups, grpl::parse(ctx, p, 1, &mut ids)?, "grpl")?,
-            _ => {}
+            _ => {
+                // Kept, not parsed (owner rule: metadata is never dropped).
+                ctx.budget.charge(size_of::<(FourCc, Extent)>())?;
+                other.try_reserve(1).map_err(|_| Error::OutOfMemory)?;
+                other.push((
+                    h.kind,
+                    Extent {
+                        offset: h.start,
+                        length: h.end.saturating_sub(h.start),
+                    },
+                ));
+            }
         }
     }
     if first {
@@ -115,5 +129,6 @@ pub(crate) fn parse(ctx: &Ctx<'_>, hdr: &BoxHeader) -> Result<Meta, Error> {
         props,
         assoc,
         groups: groups.unwrap_or_default(),
+        other,
     })
 }
