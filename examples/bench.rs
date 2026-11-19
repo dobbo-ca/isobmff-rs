@@ -1,6 +1,6 @@
 //! `bench [--threads N] <iters> <in-dir>`: for every regular file below `<in-dir>`, the median of
-//! `iters` timed runs of parse + a walk of all items, references and properties + `primary_image`
-//! + every top-level image. TSV on stdout: `name<TAB>median ns`. Name = relative path with `/`
+//! `iters` timed runs of parse, a walk of all items, references and properties, `primary_image`
+//! and every top-level image. TSV on stdout: `name<TAB>median ns`. Name = relative path with `/`
 //! replaced by `__`. A file that does not parse is skipped (the C oracles skip it too).
 
 use isobmff::{Heif, Limits};

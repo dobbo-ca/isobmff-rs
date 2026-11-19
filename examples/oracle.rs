@@ -170,7 +170,7 @@ impl Src<'_> {
     /// The bytes of one extent; `None` when it is not inside the file.
     fn extent(&mut self, e: Extent) -> Option<Vec<u8>> {
         match self {
-            Src::Mem(d) => Heif::slice(*d, e).map(<[u8]>::to_vec),
+            Src::Mem(d) => Heif::slice(d, e).map(<[u8]>::to_vec),
             Src::File(f, len) => {
                 if e.end()? > *len {
                     return None;
@@ -188,7 +188,7 @@ impl Src<'_> {
         if let Src::Mem(d) = self {
             let cancel = AtomicBool::new(false);
             return h
-                .item_bytes(*d, id, lim, &cancel)
+                .item_bytes(d, id, lim, &cancel)
                 .ok()
                 .map(std::borrow::Cow::into_owned);
         }
