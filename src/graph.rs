@@ -96,7 +96,8 @@ pub struct Item {
     /// The absolute file extents of the item data, or why they cannot be had. Bytes of an item
     /// with an error are an error only when requested.
     pub data: Result<Vec<Extent>, ItemError>,
-    /// `iloc` construction method (0 file, 1 idat); 0 for an item without an `iloc` entry.
+    /// `iloc` construction method (0 file, 1 idat, 2 item offset); 0 for an item without an `iloc`
+    /// entry.
     pub construction_method: u8,
     /// The properties of the item, in `ipma` order (index 0 entries dropped).
     pub associations: Vec<Association>,
@@ -124,6 +125,9 @@ pub struct Heif {
     /// Every other child of `meta` (`ipro`, `dinf`, unknown boxes) as (type, whole-box range), in
     /// file order. Kept so a caller can copy or inspect them; not parsed.
     pub other_boxes: Vec<(FourCc, Extent)>,
+    /// Every child of `iprp` that is not `ipco` or `ipma` (unknown boxes) as (type, whole-box range),
+    /// in file order. Kept, not parsed.
+    pub iprp_other: Vec<(FourCc, Extent)>,
     /// The file has a top-level `moov` box (not parsed in this version).
     pub has_moov: bool,
     /// Box counts of the parse.
@@ -329,7 +333,7 @@ fn kind_name(k: FourCc) -> &'static str {
 }
 
 /// The entries of a sorted `(key, value)` index with this key.
-fn span(idx: &[(u32, u32)], key: u32) -> &[(u32, u32)] {
+pub(crate) fn span(idx: &[(u32, u32)], key: u32) -> &[(u32, u32)] {
     let lo = idx.partition_point(|e| e.0 < key);
     let hi = idx.partition_point(|e| e.0 <= key);
     idx.get(lo..hi).unwrap_or_default()
@@ -411,6 +415,7 @@ pub(crate) fn build<F: Fetch>(
         mut assoc,
         groups,
         other,
+        iprp_other,
     } = meta;
     locs.sort_unstable_by_key(|i| i.id);
     if locs.windows(2).any(|w| matches!(w, [a, b] if a.id == b.id)) {
@@ -429,18 +434,26 @@ pub(crate) fn build<F: Fetch>(
     if index.windows(2).any(|w| matches!(w, [a, b] if a.0 == b.0)) {
         return Err(Error::Malformed("iinf"));
     }
+    let mut fwd = budget.vec::<(u32, u32)>(refs.len())?;
+    for (pos, r) in refs.iter().enumerate() {
+        fwd.push((r.from, pos as u32));
+    }
+    fwd.sort_unstable();
+    // Every item is resolved before the first derived payload is read: method 2 (item offset)
+    // items point into other items.
+    let mut resolved = iloc::resolve_all(&mut locs, &refs, &fwd, idat, ctx)?;
     let mut items = budget.vec::<Item>(n)?;
     let mut derived_spent = 0usize;
     for info in infos {
         budget.check_cancel()?;
         let (construction_method, data) = match locs.binary_search_by_key(&info.id, |i| i.id) {
-            Ok(pos) => match locs.get_mut(pos) {
-                Some(it) => {
-                    let m = it.method;
-                    (m, iloc::resolve(it, idat, ctx.src.file_len))
-                }
-                None => (0, Err(ItemError::NoLocation)),
-            },
+            Ok(pos) => (
+                locs.get(pos).map_or(0, |it| it.method),
+                resolved
+                    .get_mut(pos)
+                    .and_then(Option::take)
+                    .unwrap_or(Err(ItemError::NoLocation)),
+            ),
             Err(_) => (0, Err(ItemError::NoLocation)),
         };
         let associations = match assoc.binary_search_by_key(&info.id, |e| e.0) {
@@ -466,13 +479,10 @@ pub(crate) fn build<F: Fetch>(
             derived,
         });
     }
-    let mut fwd = budget.vec::<(u32, u32)>(refs.len())?;
     let mut to_total: usize = 0;
-    for (pos, r) in refs.iter().enumerate() {
-        fwd.push((r.from, pos as u32));
+    for r in &refs {
         to_total = to_total.saturating_add(r.to.len());
     }
-    fwd.sort_unstable();
     let mut rev = budget.vec::<(u32, u32)>(to_total)?;
     for (pos, r) in refs.iter().enumerate() {
         for &t in &r.to {
@@ -505,6 +515,7 @@ pub(crate) fn build<F: Fetch>(
         references: refs,
         groups,
         other_boxes: other,
+        iprp_other,
         has_moov,
         stats: Stats {
             boxes: ctx.boxes.get(),
@@ -939,7 +950,7 @@ impl Heif {
     /// # Errors
     ///
     /// [`Error::NoSuchItem`]; the [`ItemError`] of the item as an [`Error`] (`Malformed("iloc")`
-    /// without a location, `Unsupported` for construction method 2 or a data reference,
+    /// without a location, `Unsupported` for a data reference or a method-2 item with no single `iloc` reference or a source chain that is too long (or a cycle),
     /// `Truncated` for an extent past the file, `Malformed("idat")`); [`Error::Truncated`] when
     /// an extent is not inside `data`; `LimitExceeded(Alloc)`; [`Error::OutOfMemory`];
     /// [`Error::Cancelled`].

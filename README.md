@@ -49,7 +49,7 @@ Details and rationale: [docs/limits.md](docs/limits.md).
 | `max_items` | 65 535 | items (infe, iloc, ipma) | `Items` |
 | `max_properties` | 65 535 | ipco children | `Properties` |
 | `max_references` | 1 000 000 | iref `to` ids + grpl entities | `References` |
-| `max_extents` | 1 000 000 | iloc extents, all items | `Extents` |
+| `max_extents` | 1 000 000 | iloc extents, all items; work of construction method 2 | `Extents` |
 | `max_grid_tiles` | 65 536 | tiles of a grid, inputs of an iovl | `GridTiles` |
 | `max_pixels` | 1 << 30 | width x height | `Pixels` |
 | `max_meta_bytes` | 64 MiB | bytes of `meta` copied by `read` | `MetaBytes` |

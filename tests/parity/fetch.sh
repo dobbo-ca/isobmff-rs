@@ -1,18 +1,23 @@
 #!/bin/sh
-# fetch.sh <corpus.toml> <dir>: for every [[source]] of corpus.toml make a blobless, sparse git
-# checkout of `repo` at `commit` in <dir>/src/<name> (the checkout is verified: rev-parse HEAD must
+# fetch.sh <corpus.toml> <dir> <list>: for every [[source]] of corpus.toml make a blobless, sparse git
+# checkout of `repo` at `commit` in <dir>/src/<key>/<name> (the checkout is verified: rev-parse HEAD must
 # be the pinned SHA), pull the included paths of Git LFS sources, and put hardlinks (a copy if
-# the link fails) of the checked-out files under <dir>/x/<name>/<path in the repo>. Only the files
-# selected by `include` minus `exclude` are in x/. A source whose stamp <dir>/<name>.ok matches
-# (commit, lfs, include, exclude) is not fetched again, so a second run is a no-op.
+# the link fails) of the checked-out files under <dir>/v/<key>/<name>/<path in the repo>. Only the files
+# selected by `include` minus `exclude` are there. <key> is the cksum of (repo, commit, lfs, include,
+# exclude), so every variant of a source has its own directory: a variant is written once and never
+# changed after its stamp <dir>/v/<key>/<name>.ok exists. Branches with different corpus.toml files
+# share the cache mount, and a build that reads one variant never sees another build rewrite it.
+# <list> gets one "name<TAB>key" line per source: the corpus of this corpus.toml (run.sh reads it).
+# A source whose stamp matches is not fetched again, so a second run is a no-op.
 # Run it inside a BuildKit cache mount, id=isobmff-rs-data, sharing=locked. Needs git, and git-lfs
 # for the LFS sources. The sources are fetched one after the other with a pause and a retry with
 # backoff, so a run does not hit a rate limit of GitHub.
 set -eu
-[ $# -eq 2 ] || { echo "usage: fetch.sh <corpus.toml> <dir>" >&2; exit 2; }
-toml=$1 dir=$2
+[ $# -eq 3 ] || { echo "usage: fetch.sh <corpus.toml> <dir> <list>" >&2; exit 2; }
+toml=$1 dir=$2 list=$3
 tab=$(printf '\t')
-mkdir -p "$dir/src" "$dir/x"
+mkdir -p "$dir/src" "$dir/v"
+: > "$list"
 export GIT_TERMINAL_PROMPT=0
 
 # One "name repo commit lfs include exclude" line per [[source]], tab separated; the globs are
@@ -45,8 +50,10 @@ fetch_commit() { git -C "$1" fetch -q --depth 1 --filter=blob:none origin "$2"; 
 
 first=1
 while IFS=$tab read -r name repo commit lfs include exclude; do
-  src=$dir/src/$name x=$dir/x/$name stamp=$dir/$name.ok
   want="$commit $lfs $include | $exclude"
+  key=$(printf '%s %s' "$repo" "$want" | cksum | cut -d' ' -f1)
+  src=$dir/src/$key/$name x=$dir/v/$key/$name stamp=$dir/v/$key/$name.ok
+  printf '%s\t%s\n' "$name" "$key" >> "$list"
   if [ "$(cat "$stamp" 2>/dev/null || true)" = "$want" ] && [ -d "$x" ]; then
     echo "$name: up to date, $(find "$x" -type f | wc -l) files"
     continue
@@ -93,4 +100,4 @@ while IFS=$tab read -r name repo commit lfs include exclude; do
   printf '%s' "$want" > "$stamp"
   echo "$name: $n files"
 done < "$dir/sources.tsv"
-echo "isobmff-rs-data: $(du -sh "$dir" | cut -f1) in $dir, $(find "$dir/x" -type f | wc -l) files"
+echo "isobmff-rs-data: $(du -sh "$dir" | cut -f1) in $dir, $(find "$dir/v" -type f ! -name "*.ok" | wc -l) files in all variants"

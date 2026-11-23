@@ -101,15 +101,17 @@ RUN gcc -O2 -std=gnu99 -Wall -c -o /tmp/heif_oracle.o /c/heif_oracle.c $(pkg-con
 
 # The public corpus (tests/parity/corpus.toml: blobless sparse checkouts at pinned commits) in a
 # cache mount, so a build downloads it once. sharing=locked: two builds never download at once.
-# Only a list of the files reaches the layer; the stages that read the corpus mount the same cache
+# Only the list of the source variants of this corpus.toml (fetch.sh: v/<key>/<name>, written once,
+# never changed) reaches the layer, so branches with different corpus.toml files share the cache
+# without seeing each other's files; the stages that read the corpus mount the same cache
 # and depend on this stage through that list. git-lfs is for the LFS sources.
 FROM debian:bookworm-slim AS data
 RUN apt-get update && apt-get install -y --no-install-recommends git git-lfs ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY tests/parity/fetch.sh tests/parity/corpus.toml /parity/
 RUN --mount=type=cache,id=isobmff-rs-data,target=/data,sharing=locked \
-    sh /parity/fetch.sh /parity/corpus.toml /data \
-    && (cd /data/x && find . -type f | sort) > /data.list && wc -l /data.list
+    sh /parity/fetch.sh /parity/corpus.toml /data /data.list \
+    && cat /data.list
 
 # The reference trees of isobmff-rs on the libheif and libavif test data (x86_64, one thread):
 # what the aarch64 oracle must reproduce byte for byte.

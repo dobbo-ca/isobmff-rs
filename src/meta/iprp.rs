@@ -5,7 +5,7 @@ use std::ops::Range;
 use crate::boxes::{Boxes, Ctx, Cur, count_children, full_header};
 use crate::budget::Budget;
 use crate::props::{Property, parse_property};
-use crate::{Error, Limit, Limits};
+use crate::{Error, Extent, FourCc, Limit, Limits};
 
 /// One association of an item with a property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +19,10 @@ pub struct Association {
 
 /// The entries of one `ipma`: item id and its associations in order.
 pub(crate) type Entries = Vec<(u32, Vec<Association>)>;
+
+/// What `iprp` holds: the properties, the associations and every other child (type and whole-box
+/// range).
+pub(crate) type Parsed = (Vec<Property>, Entries, Vec<(FourCc, Extent)>);
 
 /// Parses the payload of an `ipma` box (starting at its version byte). `assoc` counts the
 /// associations of the whole call against `max_properties * 16`.
@@ -90,15 +94,12 @@ pub(crate) fn parse_ipco(
     Ok(props)
 }
 
-/// Parses an `iprp` box: the properties and the associations of every item (unsorted, as in the
-/// file; an item that appears twice is `Malformed("ipma")`).
-pub(crate) fn parse(
-    ctx: &Ctx<'_>,
-    payload: Range<u64>,
-    depth: usize,
-) -> Result<(Vec<Property>, Entries), Error> {
+/// Parses an `iprp` box: the properties, the associations of every item (unsorted, as in the
+/// file; an item that appears twice is `Malformed("ipma")`) and every other child kept raw.
+pub(crate) fn parse(ctx: &Ctx<'_>, payload: Range<u64>, depth: usize) -> Result<Parsed, Error> {
     let mut props: Option<Vec<Property>> = None;
     let mut entries: Entries = Vec::new();
+    let mut other: Vec<(FourCc, Extent)> = Vec::new();
     let mut ipmas: usize = 0;
     let mut assoc: usize = 0;
     let mut boxes = Boxes::new(ctx, payload, depth.saturating_add(1), false)?;
@@ -131,10 +132,10 @@ pub(crate) fn parse(
                     entries = merged;
                 }
             }
-            _ => {}
+            _ => super::keep(ctx, &mut other, &h)?,
         }
     }
-    Ok((props.unwrap_or_default(), entries))
+    Ok((props.unwrap_or_default(), entries, other))
 }
 
 #[cfg(test)]

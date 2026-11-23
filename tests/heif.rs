@@ -327,7 +327,8 @@ fn iloc_versions_and_field_sizes() {
 }
 
 #[test]
-fn construction_method_2_is_an_item_error_not_a_parse_error() {
+fn construction_method_2_without_an_iloc_reference_is_an_item_error() {
+    // The `Exif` item has method 2 and no `iloc` reference: nothing says what it points into.
     let file = method2_file();
     let h = go(&file);
     let it = h.item(2).unwrap();
@@ -346,6 +347,80 @@ fn construction_method_2_is_an_item_error_not_a_parse_error() {
     );
     assert!(h.primary_image().is_ok());
     assert_eq!(bytes(&h, &file, 1), Ok(vec![1; 4]));
+}
+
+#[test]
+fn construction_method_2_maps_ranges_onto_the_source_extents() {
+    let file = method2_items();
+    let h = go(&file);
+    // Item 20 is the first item in `idat`: its extent starts at the `idat` payload.
+    let at = h.item(20).unwrap().data.clone().unwrap()[0].offset;
+    let ext = |offset: u64, length: u64| Extent {
+        offset: at + offset,
+        length,
+    };
+    let data = |id: u32| h.item(id).unwrap().data.clone();
+    assert_eq!(h.item(32).unwrap().construction_method, 2);
+    assert_eq!(data(31), Ok(vec![ext(8, 4), ext(0, 4)]));
+    // Range 2..6 of `89ab0123` splits over both extents; length 0 runs from 6 to the end.
+    assert_eq!(data(32), Ok(vec![ext(10, 2), ext(0, 2), ext(2, 2)]));
+    assert_eq!(bytes(&h, &file, 32), Ok(b"ab0123".to_vec()));
+    // The extent index picks the source among the `to` ids of the reference.
+    assert_eq!(data(33), Ok(vec![ext(0, 3), ext(0, 2)]));
+    assert_eq!(bytes(&h, &file, 33), Ok(b"01201".to_vec()));
+    // A method-2 source (chain of two).
+    assert_eq!(data(34), Ok(vec![ext(11, 1), ext(0, 2)]));
+    assert_eq!(bytes(&h, &file, 34), Ok(b"b01".to_vec()));
+}
+
+#[test]
+fn construction_method_2_errors_are_item_errors() {
+    let file = method2_items();
+    let h = go(&file);
+    let data = |id: u32| h.item(id).unwrap().data.clone();
+    let m2 = || Err::<Vec<Extent>, _>(ItemError::Unsupported("construction method 2"));
+    // A cycle, no `iloc` reference.
+    assert_eq!(data(35), m2());
+    assert_eq!(data(36), m2());
+    assert_eq!(data(40), m2());
+    // An extent index of 0 or past the list, a range past the end of the source.
+    assert_eq!(data(37), Err(ItemError::OutOfRange));
+    assert_eq!(data(38), Err(ItemError::OutOfRange));
+    assert_eq!(data(39), Err(ItemError::OutOfRange));
+    // The source has no `iloc` entry.
+    assert_eq!(data(41), Err(ItemError::NoLocation));
+    assert_eq!(
+        bytes(&h, &file, 37),
+        Err(Error::Truncated),
+        "OutOfRange is Truncated"
+    );
+    // Eight method-2 items in a row are followed (51 to 58), nine are not (50).
+    assert!(data(51).is_ok());
+    assert_eq!(bytes(&h, &file, 51), Ok(b"89".to_vec()));
+    assert_eq!(data(50), m2());
+    // The same chain numbered bottom-up: 67 is eight hops, 68 is nine.
+    assert!(data(67).is_ok());
+    assert_eq!(data(68), m2());
+    // The rest of the file is fine.
+    assert!(h.primary_image().is_ok());
+}
+
+#[test]
+fn unknown_iprp_children_are_kept_as_ranges() {
+    let file = iprp_other_file();
+    let h = go(&file);
+    assert_eq!(h.iprp_other.len(), 2);
+    let want = [
+        (*b"junk", bx(b"junk", &[1, 2, 3])),
+        (*b"free", bx(b"free", &[0; 5])),
+    ];
+    for ((kind, e), (want_kind, want_bytes)) in h.iprp_other.iter().zip(want) {
+        assert_eq!(*kind, FourCc(want_kind));
+        assert_eq!(Heif::slice(&file, *e), Some(&want_bytes[..]));
+    }
+    // The properties and associations still parse.
+    assert!(h.primary_image().is_ok());
+    assert!(go(&single()).iprp_other.is_empty());
 }
 
 #[test]
