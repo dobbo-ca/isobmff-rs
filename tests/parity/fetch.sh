@@ -77,8 +77,10 @@ while IFS=$tab read -r name repo commit lfs include exclude; do
   got=$(git -C "$src" rev-parse HEAD)
   [ "$got" = "$commit" ] || { echo "$name: HEAD is $got, want $commit" >&2; exit 1; }
   if [ "$lfs" = 1 ]; then
-    # Only the included paths; the exclude list of an LFS source is empty.
-    retry git -C "$src" lfs pull --include="$(echo "$include" | tr ' ' ',')" </dev/null
+    # Only the included paths, minus the excluded ones (so a licence-excluded file is never downloaded).
+    set -- --include="$(echo "$include" | tr ' ' ',')"
+    [ "$exclude" = "-" ] || set -- "$@" --exclude="$(echo "$exclude" | tr ' ' ',')"
+    retry git -C "$src" lfs pull "$@" </dev/null
   fi
   mkdir -p "$x"
   find "$src" -path "$src/.git" -prune -o -type f -print | while IFS= read -r f; do

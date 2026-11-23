@@ -1,6 +1,6 @@
 # Limits
 
-`parse`, `read`, `item_bytes` and `metadata` take `&Limits` and a cancel flag; the `Heif` graph accessors do not (they work on the bounded graph). Each cap has its own `Limit` variant;
+`parse`, `read`, `item_bytes`, `metadata`, `parse_movie`, `read_movie` and the sample walks of `Track` take `&Limits` and a cancel flag; the `Heif` graph accessors do not (they work on the bounded graph). Each cap has its own `Limit` variant;
 exceeding it gives `Error::LimitExceeded(Limit::X)` (`Error::class()`: `limit-` plus the kebab-case
 name, for example `limit-grid-tiles`). Allocations from input sizes are charged to `max_alloc`
 before they happen (`Budget::vec`).
@@ -19,6 +19,7 @@ before they happen (`Budget::vec`).
 | `max_pixels` | 1 << 30 | ispe, grid and iovl width x height | max_image_size_pixels 32768 x 32768 |
 | `max_meta_bytes` | 64 MiB | size of the `meta` box (and of the `ftyp` payload) that `read` copies; `parse` has no such cap | - |
 | `max_metadata_bytes` | 64 MiB | one Exif or XMP item returned by `metadata()` | max_memory_block_size 4 GiB |
+| `max_moov_bytes` | 64 MiB | size of the `moov` box (and `ftyp` payload) that `read_movie` copies; `parse_movie` has no such cap | - |
 
 ## Why these values
 
@@ -28,6 +29,19 @@ before they happen (`Budget::vec`).
 - The defaults are far above every corpus file (see "Corpus maxima") and bound memory: 65 535 items
   at about 200 bytes each is about 13 MiB.
 - `max_pixels` equals libheif's default: 32768 x 32768.
+
+## MP4/MOV tracks
+
+- `max_moov_bytes` (64 MiB) is an estimate: a 2-hour 60 fps file with B-frames and AAC has about 10 MB of
+  `moov`. Only `read_movie` copies the box; `parse_movie` works on the caller's bytes.
+- The sample tables are not decoded: a track costs the same memory whatever its sample count. A walk
+  (`samples`, `sync_samples`, `sync_sample_at`) charges up to 6 windows of 4 KiB to `max_alloc`, and
+  `sync_samples` charges its result Vec for `min(n, sync samples)` samples. The growing `Vec`s of the
+  parse (tracks, entries, `other_boxes`) use the doubling charge of `meta/mod.rs`.
+- `max_properties` counts the children of the sample entries of all tracks together.
+- A walk's time is bounded by the table bytes of the file, the file size (a sample is at least one byte
+  and must lie inside the file) and the cancel flag (checked at each window refill and every 4096
+  samples).
 
 ## Compared with libheif
 

@@ -1,10 +1,10 @@
 # isobmff-rs
 
-Parses ISO-BMFF containers: HEIF (HEIC) and AVIF today, MP4/MOV later. It decodes no pixels. It
+Parses ISO-BMFF containers: HEIF (HEIC), AVIF and the tracks of MP4/MOV/3GP/AVIS files. It decodes no pixels. It
 gives the item graph of a file: primary image, tiles, alpha, depth, thumbnails, gain map and
 Exif/XMP, where every coded item is a codec configuration record plus byte ranges of the file.
 hevc-rs and av1-rs decode those bytes; exif-rs parses the Exif and XMP bytes. Pure Rust, no
-dependencies, `#![forbid(unsafe_code)]`, bounded on hostile input. libheif and libavif are the
+dependencies, `#![forbid(unsafe_code)]`, bounded on hostile input. libheif, libavif and ffprobe are the
 parity oracles in CI.
 
 ```toml
@@ -36,9 +36,24 @@ if let Some(gm) = &image.gain_map { println!("gain map {} {:?}", gm.image, gm.me
 let meta = heif.metadata(&file, image.id, &limits, &cancel)?; // meta.exif (TIFF bytes), meta.xmp
 ```
 
+## MP4/MOV tracks
+
+```rust
+let movie = isobmff::parse_movie(&file, &limits, &cancel)?;     // or isobmff::read_movie(reader, ..)
+let track = movie.video_track().ok_or(Error::Unsupported("no video track"))?;
+let config = track.entries[0].config();   // hvcC / av1C / avcC / vvcC; track.matrix, width, height: rotation, size
+// The byte ranges of the first 3 keyframes, or the keyframe nearest a time (media timescale):
+let first = track.sync_samples(std::io::Cursor::new(&file[..]), 3, &limits, &cancel)?;
+let near = track.sync_sample_at(std::io::Cursor::new(&file[..]), 90_000, &limits, &cancel)?;
+for s in &first { println!("{} {:?} dts {} pts {}", s.number, s.range, s.dts, s.pts()); }
+```
+
+The sample tables stay in the file and are walked on demand, so a track costs the same memory whatever its
+sample count. Movie fragments (`moof`) are not read yet. Details: [design](docs/design.md), "MP4/MOV tracks".
+
 ## Resource limits
 
-`parse`, `read`, `item_bytes` and `metadata` take `&Limits` and a cancel flag (`&AtomicBool`); there is no unlimited entry point. The `Heif` accessors (`image`, `primary_image`, `top_level_images`) work on the already-bounded graph and allocate only small uncharged results.
+`parse`, `read`, `item_bytes`, `metadata`, `parse_movie`, `read_movie` and the sample walks of `Track` take `&Limits` and a cancel flag (`&AtomicBool`); there is no unlimited entry point. The `Heif` accessors (`image`, `primary_image`, `top_level_images`) work on the already-bounded graph and allocate only small uncharged results.
 Details and rationale: [docs/limits.md](docs/limits.md). 
 | Field | Default | Unit | Error (`Limit::...`) |
 |---|---|---|---|
@@ -54,6 +69,7 @@ Details and rationale: [docs/limits.md](docs/limits.md).
 | `max_pixels` | 1 << 30 | width x height | `Pixels` |
 | `max_meta_bytes` | 64 MiB | bytes of `meta` copied by `read` | `MetaBytes` |
 | `max_metadata_bytes` | 64 MiB | bytes of one Exif or XMP item | `MetadataBytes` |
+| `max_moov_bytes` | 64 MiB | bytes of `moov` copied by `read_movie` | `MoovBytes` |
 
 - Each limit returns `Error::LimitExceeded(Limit::...)`. No thread is ever spawned: `max_threads = 1` and every other value run on the calling thread.
 - Set the cancel flag from another thread: the call returns `Error::Cancelled`.

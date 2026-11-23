@@ -94,3 +94,38 @@ lfs = true
 include = ["different_file_formats_in_sdr_and_hdr/2A*.avif", "different_file_formats_in_sdr_and_hdr/2B*.avif", "different_file_formats_in_sdr_and_hdr/3A*.heic", "different_file_formats_in_sdr_and_hdr/3B*.heic"]
 exclude = []
 licence = "README.md:31: \"All image files in this repository are licensed under the Creative Commons Zero (CC0) license\""
+
+# MP4/MOV sources of gate 5 (ffprobe vs the tracks of isobmff-rs). Named mp4-*: run.sh reads them
+# in gate 5 only, not in the HEIF and AVIF gates. The libavif and link-u animated AVIF files and
+# the mp4parse-rust AVIF files above are in gate 5 too (they have a `moov`).
+# Skipped on purpose: the 12 FileFormatConformance segment files that have no `moov` (they need
+# their init file in front: mp4-live-LastTime-depRep-R*-000*.mp4, hev1_clg1_segment.m4s,
+# DDF_10s_25fps-dynamic_rep-R*_seg-0005.3gs; PR D reads fragments), the two FFC `.mp4.zip` files of
+# more than 4 GB, the 6 RA_BodeMuseum files (CC BY-NC-ND), and mp4parse-rust `bipbop*` (no grant).
+
+# FFC has no AV1 MP4. The `.mp4` sparse patterns match files at any depth below the two dirs.
+[[source]]
+name = "mp4-ffc"
+repo = "https://github.com/MPEGGroup/FileFormatConformance"
+commit = "767a5bcb9fa4841d1b3bb0ca112a6e7d4c6bf067"
+lfs = true
+include = ["data/file_features/published/**/*.mp4", "data/file_features/published/**/*.3gp", "data/file_features/published/**/*.3gs", "data/file_features/published/**/*.m4s", "data/file_features/published/**/*.ismv", "data/file_features/published/**/*.isma", "data/file_features/published/**/*.uvu", "data/file_features/published/**/*.uvvu", "data/file_features/published/**/*.cmfm", "data/file_features/published/**/*.mp4m", "data/file_features/under_consideration/**/*.mp4", "data/file_features/under_consideration/**/*.3gp", "data/file_features/under_consideration/**/*.3gs", "data/file_features/under_consideration/**/*.m4s", "data/file_features/under_consideration/**/*.ismv", "data/file_features/under_consideration/**/*.isma", "data/file_features/under_consideration/**/*.uvu", "data/file_features/under_consideration/**/*.uvvu", "data/file_features/under_consideration/**/*.cmfm", "data/file_features/under_consideration/**/*.mp4m"]
+exclude = ["data/file_features/under_consideration/vvc/RA_BodeMuseum_*", "data/file_features/**/mp4-live-LastTime-depRep-R*-000*.mp4", "data/file_features/**/hev1_clg1_segment.m4s", "data/file_features/**/DDF_10s_25fps-dynamic_rep-R*_seg-0005.3gs"]
+licence = "LICENSE:1-3: \"The Clear BSD License / Copyright (c) 2023, Apple Inc.\"; README.md:37: \"This project operates under the Clear BSD License\"; the per-file .json licence field is empty except for the RA_BodeMuseum files (CC BY-NC-ND 4.0, excluded)"
+
+# star.mp4; the star-*.avifs of the same repo are in the link-u source above.
+[[source]]
+name = "mp4-link-u"
+repo = "https://github.com/link-u/avif-sample-images"
+commit = "c666a368b73006246694919b5dbcc078317af6cc"
+include = ["**/star.mp4"]
+exclude = []
+licence = "README.md:550: \"License: CC-BY\" (section \"Twinkle Star - Image Sequence Test\")"
+
+[[source]]
+name = "mp4-mp4parse"
+repo = "https://github.com/mozilla/mp4parse-rust"
+commit = "d3a9abfc93b22687e5e5cd9df86697adcb7d5887"
+include = ["mp4parse/tests/*.mp4", "mp4parse/tests/*.3gp", "mp4parse_capi/tests/*.mp4"]
+exclude = ["mp4parse/tests/bipbop*", "mp4parse_capi/tests/bipbop*"]
+licence = "repository licence MPL-2.0 (no data-specific statement); bbb_*: Blender, CC BY"

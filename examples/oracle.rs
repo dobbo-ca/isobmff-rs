@@ -5,6 +5,7 @@
 //! oracle heif [--threads N] [--read] <in-dir> <out-dir>   graph.txt (+ item-<id>.bin, icc-<id>.bin)
 //! oracle avif [--threads N] <in-dir> <out-dir>            avif.txt (+ avif-icc/exif/xmp.bin), AVIF files only
 //! oracle gen <in-dir> <out-dir>                           deterministic mutations of files < 1 MiB
+//! oracle mp4 [--read] <in-dir> <out-dir>                  tracks.txt (MP4/MOV tracks and keyframes; the other side is ffprobe)
 //! oracle stats <in-dir> <out.tsv>                         one line of corpus statistics per file
 //! ```
 //!
@@ -19,12 +20,12 @@
 
 use isobmff::{
     Av1c, Axis, Codec, CodecConfig, Colour, Derived, Extent, FourCc, Fraction, GainMapChannel,
-    GainMapMetadata, GainMapSource, Heif, Image, ImageKind, ItemError, Limits, PropValue,
-    Transform,
+    GainMapMetadata, GainMapSource, Heif, Image, ImageKind, ItemError, Limits, Movie, PropValue,
+    Track, Transform,
 };
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
@@ -37,7 +38,7 @@ const NOT_METADATA: [&[u8; 4]; 13] = [
 
 fn usage() -> ! {
     eprintln!(
-        "usage: oracle heif [--threads N] [--read] <in-dir> <out-dir>\n       oracle avif [--threads N] <in-dir> <out-dir>\n       oracle gen <in-dir> <out-dir>\n       oracle stats <in-dir> <out.tsv>"
+        "usage: oracle heif [--threads N] [--read] <in-dir> <out-dir>\n       oracle avif [--threads N] <in-dir> <out-dir>\n       oracle mp4 [--read] <in-dir> <out-dir>\n       oracle gen <in-dir> <out-dir>\n       oracle stats <in-dir> <out.tsv>"
     );
     std::process::exit(2)
 }
@@ -893,6 +894,241 @@ fn run_avif(args: &[String]) {
     }
 }
 
+// ---- mp4: tracks.txt ----
+
+/// The bytes after the header of the whole box at `e` (8 or 16 header bytes).
+fn box_payload(d: &[u8], e: Extent) -> Option<&[u8]> {
+    let b = Heif::slice(d, e)?;
+    let header = if be32(b, 0)? == 1 { 16 } else { 8 };
+    b.get(header..)
+}
+
+/// What ffmpeg computes differently from the tables (docs/parity.md, gate 5): the fields the
+/// oracle prints as `-`.
+#[derive(Default)]
+struct Mask {
+    /// `K` (and so every `at` line).
+    key: bool,
+    /// `pts` and every `at` line.
+    pts: bool,
+    /// `dts` (and `pts`).
+    dts: bool,
+}
+
+fn mask(t: &Track, d: &[u8]) -> Mask {
+    let mut m = Mask::default();
+    for (kind, e) in &t.tables {
+        let Some(p) = box_payload(d, *e) else {
+            continue;
+        };
+        let n = be32(p, 4).unwrap_or(0) as usize;
+        match &kind.0 {
+            // An empty stss: ffmpeg marks the first video sample only.
+            b"stss" => m.key |= n == 0,
+            // A delta above max_stts_delta is clipped by ffmpeg.
+            b"stts" => {
+                for i in 0..n {
+                    m.dts |= be32(p, 12 + i * 8).unwrap_or(0) > 0xFFF8_ACFF;
+                }
+            }
+            // ffmpeg skips a count of 0 or >= 2^31, drops the table on a huge offset, and gives
+            // samples past the table pts = dts.
+            b"ctts" => {
+                let mut total = 0u64;
+                for i in 0..n {
+                    let count = be32(p, 8 + i * 8).unwrap_or(0);
+                    let off = be32(p, 12 + i * 8).unwrap_or(0) as i32;
+                    m.pts |= count == 0 || count >= 1 << 31 || off.unsigned_abs() > 1 << 28;
+                    total += u64::from(count);
+                }
+                m.pts |= total < t.sample_count;
+            }
+            _ => {}
+        }
+    }
+    for (kind, e) in &t.other_boxes {
+        match &kind.0 {
+            // ffmpeg's keyframes also come from stps and from a `rap ` sample group.
+            b"stps" => m.key = true,
+            b"sbgp" => {
+                let g = box_payload(d, *e).and_then(|p| p.get(4..8));
+                m.key |= g == Some(b"rap ".as_slice());
+            }
+            _ => {}
+        }
+    }
+    m.pts |= m.dts;
+    m
+}
+
+fn mp4_error(name: &str, what: &str, e: &isobmff::Error) -> String {
+    eprintln!("{name}\t{what}: {e}");
+    format!("error {}\n", e.class())
+}
+
+/// `tracks.txt`. `open` gives a reader of the same file for each walk.
+fn mp4_text<R: Read + Seek>(
+    m: &Movie,
+    data: &[u8],
+    open: impl Fn() -> Option<R>,
+    lim: &Limits,
+    cancel: &AtomicBool,
+) -> String {
+    let mut o = String::new();
+    let _ = writeln!(
+        o,
+        "movie timescale={} duration={} tracks={} fragmented={}",
+        m.timescale,
+        m.duration,
+        m.tracks.len(),
+        u8::from(m.fragmented)
+    );
+    for t in &m.tracks {
+        let _ = write!(o, "track {} handler=", t.id);
+        fcc(&mut o, t.handler);
+        let _ = write!(
+            o,
+            " timescale={} samples={} entries=",
+            t.timescale, t.sample_count
+        );
+        if t.entries.is_empty() {
+            o.push('-');
+        }
+        for (i, e) in t.entries.iter().enumerate() {
+            if i > 0 {
+                o.push(',');
+            }
+            fcc(&mut o, e.kind);
+        }
+        o.push_str(" config=");
+        match t.entries.first().and_then(|e| e.config()) {
+            Some(p) => fcc(&mut o, p.kind),
+            None => o.push('-'),
+        }
+        let _ = writeln!(o, " edits={}", t.edits.len());
+        if !matches!(&t.handler.0, b"vide" | b"pict") {
+            let _ = writeln!(o, "skip {} handler", t.id);
+            continue;
+        }
+        let Some(r) = open() else {
+            let _ = writeln!(o, "e {} io", t.id);
+            continue;
+        };
+        let mut all = Vec::new();
+        let mut err = None;
+        for s in t.samples(r, lim, cancel) {
+            match s {
+                Ok(s) => all.push(s),
+                Err(e) => {
+                    err = Some(e);
+                    break;
+                }
+            }
+        }
+        // ffmpeg drops the samples of a second sample description.
+        if all.iter().any(|s| s.entry != 1) {
+            let _ = writeln!(o, "skip {} entry", t.id);
+            continue;
+        }
+        let mk = mask(t, data);
+        let first = all.first().map_or(0, |s| s.dts);
+        for s in &all {
+            let _ = write!(
+                o,
+                "s {} {} {} {} ",
+                t.id, s.number, s.range.offset, s.range.length
+            );
+            if mk.dts {
+                o.push_str("- ");
+            } else {
+                let _ = write!(o, "{} ", s.dts - first);
+            }
+            if mk.pts {
+                o.push_str("- ");
+            } else {
+                let _ = write!(o, "{} ", s.pts());
+            }
+            o.push(if mk.key {
+                '-'
+            } else if s.sync {
+                'K'
+            } else {
+                '_'
+            });
+            o.push('\n');
+        }
+        if let Some(e) = err {
+            let _ = writeln!(o, "e {} {}", t.id, e.class());
+            continue;
+        }
+        let count = all.len() as u64;
+        for j in 0..18u64 {
+            let Some(base) = count.checked_sub(1) else {
+                break;
+            };
+            let idx = (1 + base * (j / 2) / 8) as usize;
+            let pts = all.get(idx - 1).map_or(0, |s| s.pts());
+            let probe = if j % 2 == 0 {
+                pts.saturating_sub(1)
+            } else {
+                pts
+            };
+            let _ = write!(o, "at {} {} ", t.id, j);
+            if mk.pts || mk.key {
+                o.push_str("-\n");
+                continue;
+            }
+            let found = open().map(|r| t.sync_sample_at(r, probe, lim, cancel));
+            match found {
+                Some(Ok(Some(s))) => {
+                    let _ = writeln!(o, "{}", s.number);
+                }
+                Some(Ok(None)) => o.push_str("none\n"),
+                Some(Err(e)) => {
+                    let _ = writeln!(o, "e {}", e.class());
+                    break;
+                }
+                None => o.push_str("e io\n"),
+            }
+        }
+    }
+    o
+}
+
+fn mp4_file(name: &str, path: &Path, read: bool, lim: &Limits) -> String {
+    let cancel = AtomicBool::new(false);
+    let data = match fs::read(path) {
+        Ok(d) => d,
+        Err(e) => return mp4_error(name, "open", &isobmff::Error::Io(e.kind())),
+    };
+    if read {
+        let f = match File::open(path) {
+            Ok(f) => f,
+            Err(e) => return mp4_error(name, "open", &isobmff::Error::Io(e.kind())),
+        };
+        match isobmff::read_movie(BufReader::new(f), lim, &cancel) {
+            Ok(m) => mp4_text(&m, &data, || File::open(path).ok(), lim, &cancel),
+            Err(e) => mp4_error(name, "parse", &e),
+        }
+    } else {
+        match isobmff::parse_movie(&data, lim, &cancel) {
+            Ok(m) => mp4_text(&m, &data, || Some(Cursor::new(&data[..])), lim, &cancel),
+            Err(e) => mp4_error(name, "parse", &e),
+        }
+    }
+}
+
+fn run_mp4(args: &[String]) {
+    let o = opts(args);
+    let [inp, out] = &o.pos[..] else { usage() };
+    let lim = limits(&o);
+    for (name, path) in files(inp) {
+        let dir = Path::new(out).join(&name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("tracks.txt"), mp4_file(&name, &path, o.read, &lim)).unwrap();
+    }
+}
+
 // ---- gen: deterministic mutations ----
 
 const GEN_TOTAL: usize = 4000;
@@ -1096,6 +1332,7 @@ fn main() {
     match args.split_first() {
         Some((c, rest)) if c == "heif" => run_heif(rest),
         Some((c, rest)) if c == "avif" => run_avif(rest),
+        Some((c, rest)) if c == "mp4" => run_mp4(rest),
         Some((c, rest)) if c == "gen" => run_gen(rest),
         Some((c, rest)) if c == "stats" => run_stats(rest),
         _ => usage(),

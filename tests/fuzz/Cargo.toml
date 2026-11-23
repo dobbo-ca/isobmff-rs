@@ -83,3 +83,17 @@ path = "fuzz_targets/tmap.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "movie"
+path = "fuzz_targets/movie.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "movie_read"
+path = "fuzz_targets/movie_read.rs"
+test = false
+doc = false
+bench = false
