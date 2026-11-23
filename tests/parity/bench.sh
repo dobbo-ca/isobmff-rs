@@ -11,7 +11,8 @@ set -u
 export LC_ALL=C
 REP=$1 iters=${ITERS:-20} W=/work D=${DATA:-/data} tab=$(printf '\t')
 rm -rf $W; mkdir -p "$REP" $W/corpus
-while IFS=$tab read -r name key; do find "$D/v/$key/$name" -type f | while IFS= read -r f; do
+# The mp4-* sources are MP4 files for gate 5, not HEIF: the bench skips them.
+while IFS=$tab read -r name key; do case $name in mp4-*) continue ;; esac; find "$D/v/$key/$name" -type f | while IFS= read -r f; do
   cp "$f" "$W/corpus/$(printf '%s' "${f#"$D/v/$key"/}" | sed 's#/#__#g')"
 done; done < "${DATA_LIST:-/data.list}"
 bad=0

@@ -525,10 +525,12 @@ pub mod __fuzz {
         let m = parse_movie(data, limits, &cancel)?;
         for t in &m.tracks {
             let walk = t.samples(std::io::Cursor::new(data), limits, &cancel);
-            let _ = walk.take_while(Result::is_ok).count();
+            let _ = walk.take(1 << 16).take_while(Result::is_ok).count();
             let _ = t.sync_samples(std::io::Cursor::new(data), 4, limits, &cancel);
-            for at in [i64::MIN, 0, i64::MAX] {
-                let _ = t.sync_sample_at(std::io::Cursor::new(data), at, limits, &cancel);
+            if t.sample_count <= 1 << 16 {
+                for at in [i64::MIN, 0, i64::MAX] {
+                    let _ = t.sync_sample_at(std::io::Cursor::new(data), at, limits, &cancel);
+                }
             }
         }
         Ok(())

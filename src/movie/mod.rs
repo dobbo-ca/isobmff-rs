@@ -291,6 +291,9 @@ pub fn read_movie<R: Read + Seek>(
     let budget = Budget::new(limits, cancel);
     budget.check_cancel()?;
     let file_len = r.seek(SeekFrom::End(0)).map_err(io_err)?;
+    if file_len < 8 {
+        return Err(Error::UnknownFormat);
+    }
     let none = Src {
         bytes: &[],
         base: 0,
