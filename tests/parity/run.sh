@@ -49,7 +49,9 @@ gather() {
   corpus "$1" 65536
   [ -d tests/data/fuzz-grown ] && find tests/data/fuzz-grown -type f ! -name '.*' | flat "$1" tests/data 65536
   # MP4 files up to 1 MiB whole: the moov box is often past the first 64 KiB.
-  find "$D"/x/mp4-* -type f -size -1048577c 2>/dev/null | flat "$1" "$D/x"
+  while IFS=$tab read -r name key; do
+    case $name in mp4-*) find "$D/v/$key/$name" -type f -size -1048577c | flat "$1" "$D/v/$key" ;; esac
+  done < "$LIST"
   return 0
 }
 
