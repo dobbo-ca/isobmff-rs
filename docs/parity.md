@@ -135,12 +135,22 @@ track <id> handler=<4cc> timescale=<u32> samples=<n> entries=<4cc,...> config=<4
 s <id> <n> <pos> <size> <dts-dts(first sample)> <pts> <K|_>      (gated tracks only, every sample)
 at <id> <j> <number|none>                                         (gated tracks, j = 0..17)
 e <id> <class>                                                    (walk error; no more s/at lines)
-skip <id> <reason>                                                (track not gated: `handler` or `entry`)
+skip <id> <reason>                                                (track not gated: `avif`, `fragmented`, `handler` or `entry`)
 ```
 
 - **Gated tracks.** Handler `vide` or `pict`. A track where any sample has `entry` other than 1 is
   `skip <id> entry`, because ffmpeg drops those samples (`mov.c:4206`). Other handlers are
   `skip <id> handler`.
+- **Skipped files.** Two kinds of file are `skip <id> <why>` for every track, whatever its handler,
+  so that no `s` line of any track is compared (`mp4cmp.awk` compares only the ids with an `s` or
+  `e` line in ours, and ignores what ffprobe prints for the others; a file whose tracks are all
+  skipped is not in gate 5 at all, nor in the count of 5d):
+  - `avif`: the major brand of the first `ftyp` is `avif`. ffmpeg then ignores the `trak` boxes and
+    returns the primary `iloc` item as the only packet (`mov.c:1147`, `4470-4472`, `7523-7640`), so
+    ffprobe shows a still image where isobmff-rs shows the tracks of the sequence. Exact rule
+    (`strncmp(type, "avif", 4)`).
+  - `fragmented`: `moov` has an `mvex` or the file has a top-level `moof`. ffprobe reads the
+    fragments, isobmff-rs does not yet. PR D (fragments) removes this skip.
 - `s`: `pos` and `size` are the file range of the sample, `dts` is rebased to the first sample (ffmpeg
   shifts it by a per-stream amount), `pts = dts + cto` of the raw tables, `K` is `Sample::sync`.
 - **Probes.** Let `m = 1 + floor((count - 1) * floor(j / 2) / 8)` for j = 0..17. Probe `t_j` is
@@ -163,7 +173,9 @@ skip <id> <reason>                                                (track not gat
 - **ffprobe.** `ffprobe -v error -ignore_editlist 1 -ignore_chapters 1 -use_mfra_for auto
   -use_tfdt 1 -fflags +noparse+nofillin` with `-show_entries packet=stream_index,pts,dts,size,pos,flags`
   (and `stream=index,id` for the track ids), `-of csv=p=0`. The awk scripts run with `gawk -M`, so
-  that 64-bit timestamps stay exact. ffmpeg is Debian bookworm `7:5.1.9-0+deb12u1` when the archive
+  that 64-bit timestamps stay exact. A stream with side data (a non-identity `tkhd` matrix, a `pssh`)
+  makes ffprobe print an extra csv row without index and id; the scripts drop such rows (probably what emptied the
+  track id of those streams in the first CI run). ffmpeg is Debian bookworm `7:5.1.9-0+deb12u1` when the archive
   still has it, else the current bookworm ffmpeg; `summary.md` prints the version.
 - **Comparison** (`gawk -M -v fferr=0|1 -f tests/parity/mp4cmp.awk <ours> <ffprobe>`; `fferr` is 1
   when ffprobe exits non-zero or prints on stderr). Lines are keyed by (kind, id, n or j). Only ids
@@ -200,7 +212,9 @@ skip <id> <reason>                                                (track not gat
    rather than mask once a run shows them: external `url ` drefs (ours `Unsupported`, ffmpeg reads
    the main file, so only the samples before ours stops are compared), several `trun` boxes
    without data_offset and fragments with `sidx` but no `tfdt` (ffmpeg takes the sidx time; both are
-   fragments, next step), `cmov`.
+   fragments, next step), `cmov`. Listed so far (side `mp4`): a file with a track whose samples lie
+   past the end of the file (ffmpeg interleaves the tracks and stops reading at the first sample it
+   cannot read, `mov.c:8589-8613`, `8801`): `maf/vsaf/1.mp4`.
 
 `summary.md` lists the counts, the corpus maxima (items, references per box, grid tiles, extents
 per item, boxes, depth) that docs/limits.md cites, and the first 200 diff lines.

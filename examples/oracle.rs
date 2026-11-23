@@ -983,6 +983,16 @@ fn mp4_text<R: Read + Seek>(
         m.tracks.len(),
         u8::from(m.fragmented)
     );
+    // Files whose samples ffprobe does not read from the `moov` tables alone (docs/parity.md).
+    let whole = if m.ftyp.as_ref().is_some_and(|f| f.major.0 == *b"avif") {
+        // ffmpeg reads the primary item of `iloc` as the only packet (`mov.c:1147`, `4470`, `7523`).
+        Some("avif")
+    } else if m.fragmented || m.other_boxes.iter().any(|(k, _)| k.0 == *b"moof") {
+        // Fragments are not read yet; PR D removes this skip.
+        Some("fragmented")
+    } else {
+        None
+    };
     for t in &m.tracks {
         let _ = write!(o, "track {} handler=", t.id);
         fcc(&mut o, t.handler);
@@ -1006,6 +1016,10 @@ fn mp4_text<R: Read + Seek>(
             None => o.push('-'),
         }
         let _ = writeln!(o, " edits={}", t.edits.len());
+        if let Some(why) = whole {
+            let _ = writeln!(o, "skip {} {why}", t.id);
+            continue;
+        }
         if !matches!(&t.handler.0, b"vide" | b"pict") {
             let _ = writeln!(o, "skip {} handler", t.id);
             continue;

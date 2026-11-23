@@ -1,7 +1,9 @@
 # ffprobe-tracks.awk <ids> FS=, <packets.csv>: the `s` and `at` lines of `oracle mp4` from the
 # packets of ffprobe (columns: stream_index, pts, dts, size, pos, flags). Run with gawk -M, so
-# that 64-bit timestamps stay exact. <ids> holds `stream_index track_id` lines.
-FNR == NR { id[$1] = $2; next }
+# that 64-bit timestamps stay exact. <ids> holds `stream_index track_id` lines; a packet row of a
+# stream not in <ids> (an extra row for side data) is dropped.
+FNR == NR { if (NF == 2) id[$1] = $2; next }
+!($1 in id) { next }
 { t = id[$1]; n = ++c[t]; if (n == 1) d0[t] = $3
   k = substr($6, 1, 1) == "K" ? "K" : "_"
   print "s", t, n, $5, $4, $3 - d0[t], $2, k; p[t, n] = $2; key[t, n] = k }
