@@ -220,6 +220,10 @@ pub struct ItemSpec {
     pub data: Option<Vec<u8>>,
     /// `iloc` construction method: 0 file (`mdat`), 1 `idat`, 2 item offset (data goes to `idat`).
     pub method: u8,
+    /// Raw `iloc` extents `(extent_index, offset, length)` written as they are, with base offset 0,
+    /// in place of the extent that `data` would give (the item has an `iloc` entry even with no
+    /// `data`). Offsets are relative to the start of `idat` for method 1.
+    pub raw: Option<Vec<(u64, u64, u64)>>,
     /// `(essential, 1-based property index)`, in `ipma` order.
     pub assoc: Vec<(bool, u16)>,
 }
@@ -252,6 +256,12 @@ impl ItemSpec {
         self
     }
 
+    /// Sets raw `iloc` extents `(extent_index, offset, length)` (see [`ItemSpec::raw`]).
+    pub fn raw(&mut self, extents: &[(u64, u64, u64)]) -> &mut Self {
+        self.raw = Some(extents.to_vec());
+        self
+    }
+
     pub fn idat(&mut self) -> &mut Self {
         self.method = 1;
         self
@@ -281,6 +291,8 @@ pub struct Spec {
     pub pad: usize,
     /// Boxes after `mdat`.
     pub tail: Vec<u8>,
+    /// Bytes appended to the `iprp` box after `ipco` and `ipma`.
+    pub iprp_extra: Vec<u8>,
 }
 
 fn uint(b: &mut Vec<u8>, size: u8, v: u64) {
@@ -306,6 +318,7 @@ impl Spec {
             mdat_style: Style::Normal,
             pad: 0,
             tail: Vec::new(),
+            iprp_extra: Vec::new(),
         }
     }
 
@@ -322,6 +335,7 @@ impl Spec {
             mime: None,
             hidden: false,
             data: None,
+            raw: None,
             method: 0,
             assoc: Vec::new(),
         });
@@ -361,6 +375,10 @@ impl Spec {
         let mut idat = Vec::new();
         let mut at = Vec::new();
         for it in &self.items {
+            if it.raw.is_some() {
+                at.push(Some((0, 0)));
+                continue;
+            }
             at.push(it.data.as_ref().map(|d| {
                 let buf = if it.method == 0 { &mut mdat } else { &mut idat };
                 let rel = buf.len() as u64;
@@ -420,7 +438,16 @@ impl Spec {
             } else {
                 (0, origin + rel)
             };
-            uint(&mut b, f.base_size, base);
+            uint(&mut b, f.base_size, if it.raw.is_some() { 0 } else { base });
+            if let Some(raw) = &it.raw {
+                b.extend_from_slice(&(raw.len() as u16).to_be_bytes());
+                for &(index, offset, length) in raw {
+                    uint(&mut b, f.index_size, index);
+                    uint(&mut b, f.offset_size, offset);
+                    uint(&mut b, f.length_size, length);
+                }
+                continue;
+            }
             b.extend_from_slice(&1u16.to_be_bytes()); // one extent
             uint(&mut b, f.index_size, 0);
             uint(&mut b, f.offset_size, off);
@@ -472,7 +499,7 @@ impl Spec {
         }
         let ipco = bx(b"ipco", &self.props.concat());
         let ipma = fbx(b"ipma", 0, 0, &ipma);
-        out.extend_from_slice(&bx(b"iprp", &cat(&[&ipco, &ipma])));
+        out.extend_from_slice(&bx(b"iprp", &cat(&[&ipco, &ipma, &self.iprp_extra])));
         if !self.groups.is_empty() {
             let mut kids = Vec::new();
             for (kind, id, entities) in &self.groups {
@@ -738,6 +765,64 @@ fn one_image(s: &mut Spec) {
     s.hevc(1, size, cfg);
 }
 
+/// A method-2 `mime` item with raw extents `(extent_index, offset, length)` and, when `to` is not
+/// empty, an `iloc` reference from it to `to`.
+fn method2_item(s: &mut Spec, id: u32, raw: &[(u64, u64, u64)], to: &[u32]) {
+    s.item(id, b"mime").mime("text/plain").method(2).raw(raw);
+    if !to.is_empty() {
+        s.link(b"iloc", id, to);
+    }
+}
+
+/// Construction method 2 (item offset), `iloc` v1 with 4-byte extent indexes. Item 20 holds
+/// `0123456789abcdef` in `idat`; item 31 (method 1) is its bytes 8..12 then 0..4 (`89ab0123`).
+/// The method-2 items, each with an `iloc` reference to its sources:
+///
+/// - 32 (source 31): bytes 2..6 (split over both source extents), then 6 to the end (length 0).
+/// - 33 (sources 31, 20): extent 1 is 3 bytes of item 20 (index 2), extent 2 is 2 bytes of 31.
+/// - 34 (source 32): a method-2 source, bytes 1..4.
+/// - 35 and 36 refer to each other; 37 has an extent index past the list, 38 index 0, 39 a range
+///   past the end of its source, 40 no `iloc` reference, 41 a source with no `iloc` entry.
+/// - 50..=58 are a chain of nine method-2 items ending in item 31 (50 is one hop too many).
+pub fn method2_items() -> Vec<u8> {
+    let mut s = Spec::new(b"heic");
+    s.iloc = ILOC_FORMATS[3];
+    let size = s.prop(ispe(64, 48));
+    let cfg = s.prop(hvcc());
+    s.hevc(1, size, cfg);
+    s.item(20, b"mime")
+        .mime("text/plain")
+        .data(b"0123456789abcdef")
+        .idat();
+    s.item(31, b"mime")
+        .mime("text/plain")
+        .idat()
+        .raw(&[(0, 8, 4), (0, 0, 4)]);
+    method2_item(&mut s, 32, &[(1, 2, 4), (1, 6, 0)], &[31]);
+    method2_item(&mut s, 33, &[(2, 0, 3), (1, 4, 2)], &[31, 20]);
+    method2_item(&mut s, 34, &[(1, 1, 3)], &[32]);
+    method2_item(&mut s, 35, &[(1, 0, 1)], &[36]);
+    method2_item(&mut s, 36, &[(1, 0, 1)], &[35]);
+    method2_item(&mut s, 37, &[(2, 0, 1)], &[31]);
+    method2_item(&mut s, 38, &[(0, 0, 1)], &[31]);
+    method2_item(&mut s, 39, &[(1, 6, 4)], &[31]);
+    method2_item(&mut s, 40, &[(1, 0, 1)], &[]);
+    method2_item(&mut s, 41, &[(1, 0, 1)], &[99]);
+    for id in 50..=58u32 {
+        let next = if id < 58 { id + 1 } else { 31 };
+        method2_item(&mut s, id, &[(1, 0, 2)], &[next]);
+    }
+    s.build()
+}
+
+/// An image whose `iprp` has two unknown children after `ipco` and `ipma`: `junk` and `free`.
+pub fn iprp_other_file() -> Vec<u8> {
+    let mut s = Spec::new(b"heic");
+    one_image(&mut s);
+    s.iprp_extra = cat(&[&bx(b"junk", &[1, 2, 3]), &bx(b"free", &[0; 5])]);
+    s.build()
+}
+
 /// `meta` and `mdat` with 64-bit largesize headers, then a large `free` box.
 pub fn largesize() -> Vec<u8> {
     let mut s = Spec::new(b"heic");
@@ -802,6 +887,8 @@ pub fn all_files() -> Vec<(&'static str, Vec<u8>)> {
         ("exif_bad_offset", exif_bad_offset()),
         ("idat", idat_file()),
         ("method2", method2_file()),
+        ("method2_items", method2_items()),
+        ("iprp_other", iprp_other_file()),
         ("largesize", largesize()),
         ("size_zero", size_zero()),
         ("transforms", transforms()),

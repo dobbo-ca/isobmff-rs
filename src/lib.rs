@@ -70,7 +70,7 @@
 //! - Set the cancel flag from another thread to stop a call: it returns [`Error::Cancelled`].
 //!   The flag is checked every 1024 boxes and before each item is read.
 //! - A bad item does not fail the parse: the error of one item (an extent past the end of the
-//!   file, an unsupported construction method) is in [`Item::data`] and surfaces when that item's
+//!   file, a data reference other than 0) is in [`Item::data`] and surfaces when that item's
 //!   bytes are requested. A bad property fails only the images that use it.
 
 #![forbid(unsafe_code)]
@@ -390,22 +390,39 @@ pub mod __fuzz {
         with(data, limits, |ctx| walk(ctx, 0..len(data), 0, true))
     }
 
-    /// The `iloc` parser, then the resolution of every item with `data` as the file.
+    /// The `iloc` parser, then the resolution of every item with `data` as the file. Every item
+    /// gets an `iloc` reference to its neighbours, so construction method 2 is followed.
     ///
     /// # Errors
     ///
     /// `Malformed`, limit errors.
     pub fn iloc(data: &[u8], limits: &Limits) -> Result<(), Error> {
-        let cancel = AtomicBool::new(false);
-        let budget = Budget::new(limits, &cancel);
-        let idat = Some(Extent {
-            offset: 0,
-            length: len(data),
-        });
-        for mut it in iloc::parse_bytes(data, limits, &budget)? {
-            let _ = iloc::resolve(&mut it, idat, len(data));
-        }
-        Ok(())
+        with(data, limits, |ctx| {
+            let idat = Some(Extent {
+                offset: 0,
+                length: len(data),
+            });
+            let mut locs = iloc::parse_bytes(data, limits, ctx.budget)?;
+            locs.sort_unstable_by_key(|l| l.id);
+            let mut refs = Vec::new();
+            let mut fwd = Vec::new();
+            for (i, l) in locs.iter().enumerate() {
+                let to = locs
+                    .iter()
+                    .skip(i.saturating_sub(1))
+                    .take(3)
+                    .map(|n| n.id)
+                    .collect();
+                fwd.push((l.id, i as u32));
+                refs.push(Reference {
+                    kind: FourCc(*b"iloc"),
+                    from: l.id,
+                    to,
+                });
+            }
+            fwd.sort_unstable();
+            iloc::resolve_all(&mut locs, &refs, &fwd, idat, ctx).map(|_| ())
+        })
     }
 
     /// The `iinf` parser (a box whose payload is `data`).

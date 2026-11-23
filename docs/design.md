@@ -38,9 +38,9 @@ src/
   meta/
     mod.rs      Meta: hdlr, pitm, iinf, iloc, idat, iref, iprp, grpl assembled
     iinf.rs     iinf + infe v0..v3
-    iloc.rs     iloc v0..v2 -> absolute file extents
+    iloc.rs     iloc v0..v2 -> absolute file extents (construction method 2 resolved in a second pass)
     iref.rs     iref v0/v1
-    iprp.rs     ipco (property boxes, kept as ranges) + ipma
+    iprp.rs     ipco (property boxes, kept as ranges) + ipma; other children kept as ranges
     grpl.rs     grpl entity groups (altr, ...)
   props/
     mod.rs      Property enum, parse dispatch by 4cc
@@ -104,7 +104,7 @@ General ISO-BMFF reader, also for the later MP4/MOV work (`moov/trak/mdia/minf/s
 | `pitm` | 0 (u16 id), 1 (u32 id) | `primary` |
 | `iinf` | 0 (u16 count), any other version (u32 count, as libheif) | the first entry_count children; non-`infe` skipped; fewer is Malformed |
 | `infe` | 2 (u16 id), 3 (u32 id); 0/1 accepted, kept as item type `\0\0\0\0` | id, protection index, item_type, item_name, `mime`: content_type + content_encoding, `uri `: uri_type; `hidden` = flags & 1 |
-| `iloc` | 0, 1, 2 | per item: construction method, data_reference_index, base_offset, extents |
+| `iloc` | 0, 1, 2 | per item: construction method, data_reference_index, base_offset, extents (method 2 also the extent_index of each) |
 | `idat` | - | payload range, for construction method 1 |
 | `iref` | 0 (u16 ids), 1 (u32 ids) | `(type, from, [to...])` in file order |
 | `iprp`/`ipco` | - | property boxes in order (index 1..n), each as `Property` |
@@ -117,9 +117,23 @@ low 4 bits of a u16. Absolute offset of an extent = base_offset + extent_offset 
 idat payload start + base_offset + extent_offset (method 1); overflow or an end past the file
 (method 0) or past the idat payload (method 1) is recorded as an item error (below), not a parse
 error. Extent length 0 means "to the end of the file" (method 0) or "to the end of idat"
-(method 1). Construction method 2 (item offset) and a data_reference_index other than 0 are not
-supported: the item gets `ItemError::Unsupported`. An item id that appears twice in iloc, iinf or
-ipma is `Malformed`.
+(method 1). A data_reference_index other than 0 is not supported: the item gets
+`ItemError::Unsupported`. An item id that appears twice in iloc, iinf or ipma is `Malformed`.
+
+Construction method 2 (item offset, ISO 14496-12 8.11.3) is resolved after every method 0 and 1
+item and before the payloads of `grid`, `iovl` and `tmap` items are read, so `Item::data` is still
+absolute file extents and `item_bytes` and the derived parsers need no change. The source of an
+extent is `to[extent_index - 1]` of the one `iref` of type `iloc` whose `from` is the item; the
+`extent_index` of each extent is kept (1 when `index_size` is 0, as the spec says). The range
+`[base_offset + extent_offset, + extent_length)` of the concatenated data of the source item (length
+0: to its end) is cut into absolute extents along the source extents. A source that is itself
+method 2 is resolved first, at most 8 method-2 items in a row. Errors are item errors: no or more
+than one `iloc` reference, a chain of more than 8 items or a cycle: `Unsupported("construction
+method 2")`; an extent_index of 0 or past `to`, or a range past the end of the source:
+`OutOfRange`; a source with no `iloc` entry: `NoLocation`; a source with an error gives that error.
+The result of an item does not depend on the order items are visited in. Every extent of a method-2
+item and every source extent visited counts against `max_extents` (`Limit::Extents` fails the
+parse); the result vectors are charged through the `Budget`.
 
 Item errors do not fail the parse: `Item::data` is `Result<Vec<Extent>, ItemError>`. A request for
 that item's bytes gives the error. This matches libheif, which fails only when an item's data is
@@ -213,6 +227,7 @@ pub struct Heif {
     pub references: Vec<Reference>, // iref order
     pub groups: Vec<EntityGroup>,   // grpl order
     pub other_boxes: Vec<(FourCc, Extent)>, // other meta children (ipro, dinf, unknown), whole box
+    pub iprp_other: Vec<(FourCc, Extent)>,  // iprp children other than ipco/ipma, whole box
     pub has_moov: bool,
     pub stats: Stats,               // boxes visited, max depth
 }
@@ -285,7 +300,7 @@ variant: `Error::LimitExceeded(Limit::X)`.
 | `max_items` | 65 535 | `infe` entries, `iloc` items and `ipma` entries (each count) | max_items 1000 |
 | `max_properties` | 65 535 | `ipco` children; also associations per call / 16 | max_children_per_box 100 |
 | `max_references` | 1 000 000 | all `to` ids of all `iref` boxes plus all entity ids of `grpl`, together | max_items 1000 per iref box (libvips sets 16, which breaks iPhone files: libheif #1845) |
-| `max_extents` | 1 000 000 | iloc extents, all items together | max_iloc_extents_per_item 32 |
+| `max_extents` | 1 000 000 | iloc extents, all items together; also the work of resolving construction method 2 (its extents and the source extents it visits) | max_iloc_extents_per_item 32 |
 | `max_grid_tiles` | 65 536 | rows x columns of one grid; inputs of one iovl | max_number_of_tiles 4096 x 4096 |
 | `max_pixels` | 1 << 30 (32768 x 32768) | ispe width x height, grid and iovl output width x height | max_image_size_pixels 32768 x 32768 |
 | `max_meta_bytes` | 64 MiB | size of the `meta` box that `read` copies | - |
@@ -360,5 +375,5 @@ Spec of the oracle output: docs/parity.md. Summary:
 
 The item graph exposes and keeps every item, property, reference and entity group: Exif, XMP,
 ICC and nclx, gain-map items, depth, thumbnails, and unknown items and properties as raw byte
-ranges. Every other child of `meta` (`ipro`, `dinf`, unknown boxes) is kept as a (type, whole-box range) in `Heif::other_boxes`, and the protection index of each item is kept. Dropped while parsing: unknown children of `iprp`, `iloc` entries with no `infe`, and `ipma` entries for unknown ids (none of these is reachable from an item). v1 writes no files; any later API that writes or
+ranges. Every other child of `meta` (`ipro`, `dinf`, unknown boxes) is kept as a (type, whole-box range) in `Heif::other_boxes`, every child of `iprp` other than `ipco` and `ipma` in `Heif::iprp_other` (same shape, charged by doubling), and the protection index of each item is kept. Dropped while parsing: `iloc` entries with no `infe`, and `ipma` entries for unknown ids (none of these is reachable from an item). v1 writes no files; any later API that writes or
 filters a file keeps all of these by default and drops them only on an explicit option.

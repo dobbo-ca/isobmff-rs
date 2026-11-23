@@ -10,7 +10,7 @@ call `isobmff::__fuzz::*` (hidden, `fn(&[u8], &Limits) -> Result<(), Error>` on 
 | `parse` | `parse` on the whole input, then every graph call and `metadata` | graph building, every `Image`, item bytes, no panic |
 | `read` | `read` over a `Cursor` | equals `parse` on the same bytes (`Ok` and `Err`) |
 | `boxes` | `__fuzz::boxes` | box tree walked to `max_depth`, size/largesize/uuid headers |
-| `iloc` | `__fuzz::iloc` | iloc v0..v2 parse and extent resolution |
+| `iloc` | `__fuzz::iloc` | iloc v0..v2 parse and extent resolution, construction method 2 over neighbouring items |
 | `iinf` | `__fuzz::iinf` | iinf and infe v0..v3 |
 | `iref` | `__fuzz::iref` | iref v0/v1 |
 | `ipma` | `__fuzz::ipma` | ipma v0/v1, both flag widths |

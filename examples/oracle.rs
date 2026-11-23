@@ -607,6 +607,10 @@ fn item_range(h: &Heif, id: u32) -> Option<(u64, u64)> {
     if it.construction_method == 1 {
         return Some((0, 0));
     }
+    // The avif oracle keeps method 2 an item error (libavif was not checked for it).
+    if it.construction_method == 2 {
+        return None;
+    }
     let ex = it.data.as_ref().ok()?;
     let lo = ex.iter().map(|e| e.offset).min()?;
     let hi = ex.iter().map(|e| e.offset.saturating_add(e.length)).max()?;
@@ -751,6 +755,13 @@ fn avif_text(name: &str, data: &[u8], dir: &Path, lim: &Limits) -> String {
         }
         if is_exif && exif_error {
             continue;
+        }
+        if it.construction_method == 2 {
+            return fail(
+                name,
+                &format!("item {}", it.id),
+                ItemError::Unsupported("construction method 2"),
+            );
         }
         let b = match h.item_bytes(data, it.id, lim, &cancel) {
             Ok(b) => b,

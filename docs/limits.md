@@ -14,7 +14,7 @@ before they happen (`Budget::vec`).
 | `max_items` | 65 535 | `infe` entries, `iloc` items, `ipma` entries (each count) | max_items 1000 |
 | `max_properties` | 65 535 | `ipco` children; associations per call / 16 | max_children_per_box 100 |
 | `max_references` | 1 000 000 | all `to` ids of all `iref` boxes plus all `grpl` entity ids | max_items 1000 per iref box |
-| `max_extents` | 1 000 000 | iloc extents, all items together | max_iloc_extents_per_item 32 |
+| `max_extents` | 1 000 000 | iloc extents, all items together; also the work of resolving construction method 2 | max_iloc_extents_per_item 32 |
 | `max_grid_tiles` | 65 536 | rows x columns of a grid; inputs of an iovl | max_number_of_tiles 4096 x 4096 |
 | `max_pixels` | 1 << 30 | ispe, grid and iovl width x height | max_image_size_pixels 32768 x 32768 |
 | `max_meta_bytes` | 64 MiB | size of the `meta` box (and of the `ftyp` payload) that `read` copies; `parse` has no such cap | - |

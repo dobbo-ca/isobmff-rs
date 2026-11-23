@@ -33,6 +33,32 @@ pub(crate) struct Meta {
     pub(crate) groups: Vec<EntityGroup>,
     /// Every other child of `meta` (`ipro`, `dinf`, unknown boxes): type and whole-box range.
     pub(crate) other: Vec<(FourCc, Extent)>,
+    /// Every child of `iprp` that is not `ipco` or `ipma`: type and whole-box range.
+    pub(crate) iprp_other: Vec<(FourCc, Extent)>,
+}
+
+/// Pushes the type and whole-box range of `h` onto `kept`. Grows by doubling; the whole new
+/// capacity is charged first.
+pub(crate) fn keep(
+    ctx: &Ctx<'_>,
+    kept: &mut Vec<(FourCc, Extent)>,
+    h: &BoxHeader,
+) -> Result<(), Error> {
+    if kept.len() == kept.capacity() {
+        let add = kept.capacity().max(4);
+        ctx.budget
+            .charge(add.saturating_mul(size_of::<(FourCc, Extent)>()))?;
+        kept.try_reserve_exact(add)
+            .map_err(|_| Error::OutOfMemory)?;
+    }
+    kept.push((
+        h.kind,
+        Extent {
+            offset: h.start,
+            length: h.end.saturating_sub(h.start),
+        },
+    ));
+    Ok(())
 }
 
 fn once<T>(slot: &mut Option<T>, v: T, what: &'static str) -> Result<(), Error> {
@@ -59,7 +85,7 @@ pub(crate) fn parse(ctx: &Ctx<'_>, hdr: &BoxHeader) -> Result<Meta, Error> {
     let mut iloc: Option<Vec<IlocItem>> = None;
     let mut idat: Option<Extent> = None;
     let mut refs: Option<Vec<Reference>> = None;
-    let mut iprp: Option<(Vec<Property>, iprp::Entries)> = None;
+    let mut iprp: Option<iprp::Parsed> = None;
     let mut groups: Option<Vec<EntityGroup>> = None;
     let mut ids: usize = 0;
     let mut other: Vec<(FourCc, Extent)> = Vec::new();
@@ -104,29 +130,14 @@ pub(crate) fn parse(ctx: &Ctx<'_>, hdr: &BoxHeader) -> Result<Meta, Error> {
             b"grpl" => once(&mut groups, grpl::parse(ctx, p, 1, &mut ids)?, "grpl")?,
             _ => {
                 // Kept, not parsed (owner rule: metadata is never dropped).
-                if other.len() == other.capacity() {
-                    // Grow by doubling; the whole new capacity is charged first.
-                    let add = other.capacity().max(4);
-                    ctx.budget
-                        .charge(add.saturating_mul(size_of::<(FourCc, Extent)>()))?;
-                    other
-                        .try_reserve_exact(add)
-                        .map_err(|_| Error::OutOfMemory)?;
-                }
-                other.push((
-                    h.kind,
-                    Extent {
-                        offset: h.start,
-                        length: h.end.saturating_sub(h.start),
-                    },
-                ));
+                keep(ctx, &mut other, &h)?;
             }
         }
     }
     if first {
         return Err(Error::Malformed("hdlr"));
     }
-    let (props, assoc) = iprp.unwrap_or_default();
+    let (props, assoc, iprp_other) = iprp.unwrap_or_default();
     Ok(Meta {
         primary: primary.unwrap_or(0),
         items: items.unwrap_or_default(),
@@ -137,5 +148,6 @@ pub(crate) fn parse(ctx: &Ctx<'_>, hdr: &BoxHeader) -> Result<Meta, Error> {
         assoc,
         groups: groups.unwrap_or_default(),
         other,
+        iprp_other,
     })
 }

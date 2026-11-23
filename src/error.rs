@@ -112,7 +112,8 @@ impl Error {
 pub enum ItemError {
     /// The item has no entry in `iloc`.
     NoLocation,
-    /// Construction method 2 (item offset), a data reference other than 0, or an unknown method.
+    /// A data reference other than 0, an unknown construction method, or a construction method 2
+    /// (item offset) item that has no single `iloc` reference or a source chain that is too long.
     Unsupported(&'static str),
     /// An extent overflows or ends past the file (or past `idat`).
     OutOfRange,

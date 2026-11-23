@@ -5,7 +5,7 @@ All builds and tests run in CI (nothing runs on the owner's Mac).
 | Where | Covers |
 |---|---|
 | `src/boxes.rs` | box headers: size, largesize, size 0, uuid, bad sizes, depth and box limits |
-| `src/ftyp.rs`, `src/meta/*` | brands; iinf/infe, iloc v0..v2 (extent resolution, idat, errors), iref, ipma/ipco |
+| `src/ftyp.rs`, `src/meta/*` | brands; iinf/infe, iloc v0..v2 (extent resolution, idat, method 2, errors), iref, ipma/ipco |
 | `src/props/*` | ispe, pixi, colr, irot, imir, clap (`Clap::crop` rule), auxC, hvcC, av1C |
 | `src/derived.rs` | grid, iovl, tmap: both tmap layouts, bad denominators, trailing bytes |
 | `src/graph.rs`, `src/metadata.rs` | image kinds, transforms, alpha/depth/thumbnails, gain maps, top-level images, Exif/XMP bytes |
