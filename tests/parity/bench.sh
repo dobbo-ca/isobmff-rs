@@ -4,15 +4,16 @@
 # one container; summary.md has the median ns per open and walk by file size class and the ratio
 # isobmff-rs / C library (below 1 means isobmff-rs is faster). Information only, no gate: the
 # status is 0 unless a tool fails or no file was timed by all the tools of the first table.
-# The tools print TSV `name<TAB>ns`; the corpus is the cache mount of fetch.sh under /data/x. The
+# The tools print TSV `name<TAB>ns`; the corpus is the cache mount of fetch.sh: the variants that
+# /data.list names, under /data/v/<key>/<name> (tests/parity/run.sh, corpus). The
 # parser has no threads, so the 1-thread and default columns are expected to be equal.
 set -u
 export LC_ALL=C
 REP=$1 iters=${ITERS:-20} W=/work D=${DATA:-/data} tab=$(printf '\t')
 rm -rf $W; mkdir -p "$REP" $W/corpus
-find "$D/x" -type f | while IFS= read -r f; do
-  cp "$f" "$W/corpus/$(printf '%s' "${f#"$D"/x/}" | sed 's#/#__#g')"
-done
+while IFS=$tab read -r name key; do find "$D/v/$key/$name" -type f | while IFS= read -r f; do
+  cp "$f" "$W/corpus/$(printf '%s' "${f#"$D/v/$key"/}" | sed 's#/#__#g')"
+done; done < "${DATA_LIST:-/data.list}"
 bad=0
 find $W/corpus -type f -printf '%f\t%s\n' | sort -t "$tab" -k1,1 > $W/sizes.tsv
 heif-oracle --bench "$iters" $W/corpus > $W/h.raw || bad=1

@@ -1,6 +1,7 @@
 #!/bin/sh
 # Parity gates of isobmff-rs (docs/parity.md). CI only, called by .github/ci/Dockerfile from the
-# repo root; the corpus is the BuildKit cache mount of fetch.sh at /data (files under /data/x).
+# repo root; the corpus is the BuildKit cache mount of fetch.sh at /data: the source variants that
+# /data.list (fetch.sh <list>, one "name<TAB>key" line per source) names, under /data/v/<key>/<name>.
 #   run.sh gather <dst>          seeds for the fuzz targets: the first 65536 bytes of every corpus
 #                                file and of tests/data/fuzz-grown/* (if present), each named by
 #                                its path with / replaced by __
@@ -20,6 +21,16 @@ D=${DATA:-/data}
 MIN=${PARITY_MIN_INPUTS:-600}
 KNOWN=tests/parity/known-differences.tsv
 tab=$(printf '\t')
+LIST=${DATA_LIST:-/data.list}
+
+# corpus <dst> [maxbytes]: the files of every source in $LIST into <dst>, flattened by flat with
+# <name>/<path> as the relative path (the names do not depend on the variant key).
+corpus() {
+  dst=$1 max=${2:-}
+  while IFS=$tab read -r name key; do
+    find "$D/v/$key/$name" -type f | flat "$dst" "$D/v/$key" $max
+  done < "$LIST"
+}
 
 # flat <dst> <root> [maxbytes]: the files named on stdin (paths under <root>) into <dst>, flattened
 # (/ becomes __); with maxbytes only their first bytes.
@@ -32,7 +43,7 @@ flat() {
 
 gather() {
   mkdir -p "$1"
-  find "$D/x" -type f | flat "$1" "$D/x" 65536
+  corpus "$1" 65536
   [ -d tests/data/fuzz-grown ] && find tests/data/fuzz-grown -type f ! -name '.*' | flat "$1" tests/data 65536
   return 0
 }
@@ -147,7 +158,7 @@ full() {
   REP=$1 bad=0
   rm -rf $W; mkdir -p "$REP" $W/corpus $W/small $W/mut $W/all
   # --- the inputs
-  find "$D/x" -type f | flat $W/corpus "$D/x"
+  corpus $W/corpus
   [ -d tests/data/fuzz-grown ] && find tests/data/fuzz-grown -type f ! -name '.*' | flat $W/corpus tests/data
   ls $W/corpus > $W/corpus.names
   cn=$(wc -l < $W/corpus.names)
@@ -243,10 +254,11 @@ stats_table() {
 # The test data of libheif and libavif: the subset that the aarch64 run is compared on.
 subset() {
   mkdir -p "$1"
-  for s in libheif libavif; do
-    [ -d "$D/x/$s/tests/data" ] && find "$D/x/$s/tests/data" -type f | flat "$1" "$D/x"
-  done
-  [ -n "$(ls "$1")" ] || { echo "no libheif/libavif test data under $D/x" >&2; return 1; }
+  while IFS=$tab read -r name key; do
+    case $name in libheif | libavif) ;; *) continue ;; esac
+    if [ -d "$D/v/$key/$name/tests/data" ]; then find "$D/v/$key/$name/tests/data" -type f | flat "$1" "$D/v/$key"; fi
+  done < "$LIST"
+  [ -n "$(ls "$1")" ] || { echo "no libheif/libavif test data in $LIST" >&2; return 1; }
 }
 
 ref() {
