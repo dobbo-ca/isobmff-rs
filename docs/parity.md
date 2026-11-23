@@ -146,10 +146,12 @@ skip <id> <reason>                                                (track not gat
   `e` line in ours, and ignores what ffprobe prints for the others; a file whose tracks are all
   skipped is not in gate 5 at all, nor in the count of 5d):
   - `avif`: the major brand of the first `ftyp` is `avif`. ffmpeg then ignores the `trak` boxes and
-    returns the primary `iloc` item as the only packet (`mov.c:1147`, `4470-4472`, `7523-7640`), so
+    returns the primary `iloc` item as the only packet. Where `meta` precedes `moov`, `iloc` sets
+    found_moov and the real `moov` is skipped as a duplicate (`mov.c:1147`, `1178-1183`,
+    `7523-7640`); where `moov` comes first the header read fails (`4470`). So
     ffprobe shows a still image where isobmff-rs shows the tracks of the sequence. Exact rule
     (`strncmp(type, "avif", 4)`).
-  - `fragmented`: `moov` has an `mvex` or the file has a top-level `moof`. ffprobe reads the
+  - `fragmented`: the file has a top-level `moof`. ffprobe reads the
     fragments, isobmff-rs does not yet. PR D (fragments) removes this skip.
 - `s`: `pos` and `size` are the file range of the sample, `dts` is rebased to the first sample (ffmpeg
   shifts it by a per-stream amount), `pts = dts + cto` of the raw tables, `K` is `Sample::sync`.
@@ -174,8 +176,8 @@ skip <id> <reason>                                                (track not gat
   -use_tfdt 1 -fflags +noparse+nofillin` with `-show_entries packet=stream_index,pts,dts,size,pos,flags`
   (and `stream=index,id` for the track ids), `-of csv=p=0`. The awk scripts run with `gawk -M`, so
   that 64-bit timestamps stay exact. A stream with side data (a non-identity `tkhd` matrix, a `pssh`)
-  makes ffprobe print an extra csv row without index and id; the scripts drop such rows (probably what emptied the
-  track id of those streams in the first CI run). ffmpeg is Debian bookworm `7:5.1.9-0+deb12u1` when the archive
+  makes ffprobe print an extra csv row without index and id; the scripts drop such rows. ffprobe's csv writer
+  (ffprobe.c `compact_print_section_header`/`footer`) ends such a row with a separator and adds one empty row per side-data element. ffmpeg is Debian bookworm `7:5.1.9-0+deb12u1` when the archive
   still has it, else the current bookworm ffmpeg; `summary.md` prints the version.
 - **Comparison** (`gawk -M -v fferr=0|1 -f tests/parity/mp4cmp.awk <ours> <ffprobe>`; `fferr` is 1
   when ffprobe exits non-zero or prints on stderr). Lines are keyed by (kind, id, n or j). Only ids

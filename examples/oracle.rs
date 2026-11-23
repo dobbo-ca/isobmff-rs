@@ -985,9 +985,11 @@ fn mp4_text<R: Read + Seek>(
     );
     // Files whose samples ffprobe does not read from the `moov` tables alone (docs/parity.md).
     let whole = if m.ftyp.as_ref().is_some_and(|f| f.major.0 == *b"avif") {
-        // ffmpeg reads the primary item of `iloc` as the only packet (`mov.c:1147`, `4470`, `7523`).
+        // ffmpeg reads the primary item of `iloc` as the only packet. Where `meta` precedes `moov`,
+        // `iloc` sets found_moov and the real `moov` is skipped as a duplicate (`mov.c:1147`,
+        // `1178-1183`, `7523-7640`); where `moov` comes first the header read fails (`4470`).
         Some("avif")
-    } else if m.fragmented || m.other_boxes.iter().any(|(k, _)| k.0 == *b"moof") {
+    } else if m.other_boxes.iter().any(|(k, _)| k.0 == *b"moof") {
         // Fragments are not read yet; PR D removes this skip.
         Some("fragmented")
     } else {
