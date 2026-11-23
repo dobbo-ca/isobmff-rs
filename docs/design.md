@@ -131,7 +131,7 @@ method 2 is resolved first, at most 8 method-2 items in a row. Errors are item e
 than one `iloc` reference, a chain of more than 8 items or a cycle: `Unsupported("construction
 method 2")`; an extent_index of 0 or past `to`, or a range past the end of the source:
 `OutOfRange`; a source with no `iloc` entry: `NoLocation`; a source with an error gives that error.
-The result of an item does not depend on the order items are visited in. Every extent of a method-2
+The chain length of each item is stored with its result (0 for methods 0 and 1, else 1 + the longest source chain) and a cycle is found by an in-progress mark, so the result of an item does not depend on the order items are visited in. Every extent of a method-2
 item and every source extent visited counts against `max_extents` (`Limit::Extents` fails the
 parse); the result vectors are charged through the `Budget`.
 

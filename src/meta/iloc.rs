@@ -214,13 +214,18 @@ struct Solver<'a, 'c> {
     /// (`from` id, position in `refs`), sorted.
     fwd: &'a [(u32, u32)],
     out: Vec<Option<Resolved>>,
+    /// Per item: the length of its method-2 source chain (0 for methods 0 and 1).
+    hops: Vec<u8>,
+    /// Per item: being solved right now (a source that is `busy` is a cycle).
+    busy: Vec<bool>,
     steps: usize,
 }
 
 impl Solver<'_, '_> {
-    /// Makes sure `out[pos]` is set. `false`: a source chain below is longer than [`MAX_HOPS`] and
-    /// nothing was stored (only the item at depth 0 stores the failure, so the result of an item
-    /// does not depend on the order the items are visited in).
+    /// Makes sure `out[pos]` is set. `false`: the recursion reached [`MAX_HOPS`] below an unsolved
+    /// item and nothing was stored. Only the item at depth 0 stores that failure: the chain below
+    /// it is then longer than [`MAX_HOPS`] whatever the order the items are visited in. Chains
+    /// that are fully solved are judged by `hops`.
     fn solve(&mut self, pos: usize, depth: usize) -> Result<bool, Error> {
         if matches!(self.out.get(pos), Some(Some(_))) {
             return Ok(true);
@@ -230,10 +235,27 @@ impl Solver<'_, '_> {
         }
         self.ctx.budget.check_cancel()?;
         let mut acc = Vec::new();
-        let filled = self.fill(pos, depth, &mut acc)?;
+        let mut hop = 0u8;
+        if let Some(b) = self.busy.get_mut(pos) {
+            *b = true;
+        }
+        let filled = self.fill(pos, depth, &mut acc, &mut hop)?;
+        if let Some(b) = self.busy.get_mut(pos) {
+            *b = false;
+        }
         let spent = acc.capacity().saturating_mul(size_of::<Extent>());
+        let hop = hop.saturating_add(1);
         let r = match filled {
-            Fill::Done => Ok(acc),
+            Fill::Done if usize::from(hop) > MAX_HOPS => {
+                self.ctx.budget.release(spent);
+                Err(ItemError::Unsupported("construction method 2"))
+            }
+            Fill::Done => {
+                if let Some(h) = self.hops.get_mut(pos) {
+                    *h = hop;
+                }
+                Ok(acc)
+            }
             Fill::Item(e) => {
                 self.ctx.budget.release(spent);
                 Err(e)
@@ -253,7 +275,13 @@ impl Solver<'_, '_> {
     }
 
     /// Maps every extent of the method-2 item at `pos` onto the file extents of its source items.
-    fn fill(&mut self, pos: usize, depth: usize, acc: &mut Vec<Extent>) -> Result<Fill, Error> {
+    fn fill(
+        &mut self,
+        pos: usize,
+        depth: usize,
+        acc: &mut Vec<Extent>,
+        hop: &mut u8,
+    ) -> Result<Fill, Error> {
         let ctx = self.ctx;
         let max = ctx.limits.max_extents;
         let (locs, refs, fwd) = (self.locs, self.refs, self.fwd);
@@ -283,11 +311,15 @@ impl Solver<'_, '_> {
             let Ok(sp) = locs.binary_search_by_key(&source, |l| l.id) else {
                 return Ok(Fill::Item(ItemError::NoLocation));
             };
+            if self.busy.get(sp) == Some(&true) {
+                return Ok(Fill::Item(ItemError::Unsupported("construction method 2")));
+            }
             if !matches!(self.out.get(sp), Some(Some(_)))
                 && !self.solve(sp, depth.saturating_add(1))?
             {
                 return Ok(Fill::TooDeep);
             }
+            *hop = (*hop).max(self.hops.get(sp).copied().unwrap_or(0));
             let src = match self.out.get(sp) {
                 Some(Some(Ok(s))) => s,
                 Some(Some(Err(err))) => return Ok(Fill::Item(*err)),
@@ -353,12 +385,20 @@ pub(crate) fn resolve_all(
         });
     }
     let locs: &[IlocItem] = locs;
+    let mut hops = ctx.budget.vec::<u8>(locs.len())?;
+    let mut busy = ctx.budget.vec::<bool>(locs.len())?;
+    for _ in locs {
+        hops.push(0);
+        busy.push(false);
+    }
     let mut solver = Solver {
         ctx,
         locs,
         refs,
         fwd,
         out,
+        hops,
+        busy,
         steps: 0,
     };
     for pos in 0..locs.len() {

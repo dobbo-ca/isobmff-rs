@@ -784,6 +784,8 @@ fn method2_item(s: &mut Spec, id: u32, raw: &[(u64, u64, u64)], to: &[u32]) {
 /// - 35 and 36 refer to each other; 37 has an extent index past the list, 38 index 0, 39 a range
 ///   past the end of its source, 40 no `iloc` reference, 41 a source with no `iloc` entry.
 /// - 50..=58 are a chain of nine method-2 items ending in item 31 (50 is one hop too many).
+/// - 60..=68 are the same chain numbered the other way (68 is one hop too many): the result does
+///   not depend on the order the items are visited in.
 pub fn method2_items() -> Vec<u8> {
     let mut s = Spec::new(b"heic");
     s.iloc = ILOC_FORMATS[3];
@@ -810,6 +812,10 @@ pub fn method2_items() -> Vec<u8> {
     method2_item(&mut s, 41, &[(1, 0, 1)], &[99]);
     for id in 50..=58u32 {
         let next = if id < 58 { id + 1 } else { 31 };
+        method2_item(&mut s, id, &[(1, 0, 2)], &[next]);
+    }
+    for id in 60..=68u32 {
+        let next = if id > 60 { id - 1 } else { 31 };
         method2_item(&mut s, id, &[(1, 0, 2)], &[next]);
     }
     s.build()

@@ -950,7 +950,7 @@ impl Heif {
     /// # Errors
     ///
     /// [`Error::NoSuchItem`]; the [`ItemError`] of the item as an [`Error`] (`Malformed("iloc")`
-    /// without a location, `Unsupported` for a data reference or a method-2 item with no `iloc` reference,
+    /// without a location, `Unsupported` for a data reference or a method-2 item with no single `iloc` reference or a source chain that is too long (or a cycle),
     /// `Truncated` for an extent past the file, `Malformed("idat")`); [`Error::Truncated`] when
     /// an extent is not inside `data`; `LimitExceeded(Alloc)`; [`Error::OutOfMemory`];
     /// [`Error::Cancelled`].

@@ -153,9 +153,9 @@ counts of the public vectors. run.sh puts the maxima in summary.md.
 - An `iloc` extent with `extent_length` 0 is read here as "to the end of the file" (method 0) or
   of `idat` (method 1), as ISO 14496-12 says. libheif and libavif read zero bytes. No corpus file
   has one.
-- Construction method 2 (item offset) is resolved by the crate and by libheif. The `oracle avif`
+- Construction method 2 (item offset) is resolved by the crate but not by libheif. The `oracle avif`
   rebuild does not follow it (it reports an item error when a method-2 item's range or Exif is
   needed, as before): the libavif side was not checked for method 2, and no AVIF corpus file uses it.
-  The heif side compares the item bytes, which are the same when both resolve the item. The one
+  The heif side compares the item bytes; libheif does not resolve method 2, so a diff is expected there. The one
   corpus file with method 2, `iff_hevc_tile_multiple_items_tbas.heic`, keeps its line in
   `known-differences.tsv` until CI parity shows its diff is empty.

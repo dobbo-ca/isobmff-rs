@@ -404,15 +404,11 @@ pub mod __fuzz {
             });
             let mut locs = iloc::parse_bytes(data, limits, ctx.budget)?;
             locs.sort_unstable_by_key(|l| l.id);
-            let mut refs = Vec::new();
-            let mut fwd = Vec::new();
+            let mut refs = ctx.budget.vec::<Reference>(locs.len())?;
+            let mut fwd = ctx.budget.vec::<(u32, u32)>(locs.len())?;
             for (i, l) in locs.iter().enumerate() {
-                let to = locs
-                    .iter()
-                    .skip(i.saturating_sub(1))
-                    .take(3)
-                    .map(|n| n.id)
-                    .collect();
+                let mut to = ctx.budget.vec::<u32>(3)?;
+                to.extend(locs.iter().skip(i.saturating_sub(1)).take(3).map(|n| n.id));
                 fwd.push((l.id, i as u32));
                 refs.push(Reference {
                     kind: FourCc(*b"iloc"),

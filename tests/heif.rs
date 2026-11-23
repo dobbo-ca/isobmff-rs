@@ -398,6 +398,9 @@ fn construction_method_2_errors_are_item_errors() {
     assert!(data(51).is_ok());
     assert_eq!(bytes(&h, &file, 51), Ok(b"89".to_vec()));
     assert_eq!(data(50), m2());
+    // The same chain numbered bottom-up: 67 is eight hops, 68 is nine.
+    assert!(data(67).is_ok());
+    assert_eq!(data(68), m2());
     // The rest of the file is fine.
     assert!(h.primary_image().is_ok());
 }

@@ -748,6 +748,13 @@ fn avif_text(name: &str, data: &[u8], dir: &Path, lim: &Limits) -> String {
         if !is_exif && !img.xmp.contains(&it.id) {
             continue;
         }
+        if it.construction_method == 2 {
+            return fail(
+                name,
+                &format!("item {}", it.id),
+                ItemError::Unsupported("construction method 2"),
+            );
+        }
         match &it.data {
             Ok(v) if v.iter().all(|e| e.length == 0) => continue,
             Err(ItemError::NoLocation) => continue,
@@ -755,13 +762,6 @@ fn avif_text(name: &str, data: &[u8], dir: &Path, lim: &Limits) -> String {
         }
         if is_exif && exif_error {
             continue;
-        }
-        if it.construction_method == 2 {
-            return fail(
-                name,
-                &format!("item {}", it.id),
-                ItemError::Unsupported("construction method 2"),
-            );
         }
         let b = match h.item_bytes(data, it.id, lim, &cancel) {
             Ok(b) => b,
