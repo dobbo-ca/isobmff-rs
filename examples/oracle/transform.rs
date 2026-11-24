@@ -349,10 +349,40 @@ fn plane_diff(a: &Pl, b: &Pl, k: usize) -> Option<String> {
     Some(format!("plane {k}: first difference at byte {i}"))
 }
 
+/// The largest absolute sample difference of two planes of the same size and sample width, and
+/// the number of samples that differ.
+fn max_diff(a: &Pl, b: &Pl) -> (u32, usize) {
+    let (mut m, mut n) = (0u32, 0usize);
+    let mut see = |x: u32, y: u32| {
+        if x != y {
+            m = m.max(x.abs_diff(y));
+            n += 1;
+        }
+    };
+    if a.bps == 1 {
+        a.data
+            .iter()
+            .zip(b.data)
+            .for_each(|(&x, &y)| see(x.into(), y.into()));
+    } else {
+        let (pa, _) = a.data.as_chunks::<2>();
+        let (pb, _) = b.data.as_chunks::<2>();
+        pa.iter()
+            .zip(pb)
+            .for_each(|(x, y)| see(u16::from_le_bytes(*x).into(), u16::from_le_bytes(*y).into()));
+    }
+    (m, n)
+}
+
+/// Largest luma difference allowed for a `libheif-444-rgb` row: libheif converted that image to
+/// 4:4:4 through RGB (its YCbCr 4:2:0 to 4:4:4 step refuses the input, chroma_sampling.cc:459),
+/// so its luma is rounded twice. A wrong crop or turn of a photo gives far larger differences.
+const RGB_TOL: u32 = 3;
+
 /// Compares the isobmff-rs result `b` with the libheif result `a`; `Ok` is the number of planes
 /// compared. A known entry (libheif changed the chroma format to 4:4:4) compares the luma plane
 /// and the alpha plane only.
-fn compare(a: &Parsed, b: &Parsed, raw: &Parsed, known: bool) -> Result<u32, String> {
+fn compare(a: &Parsed, b: &Parsed, raw: &Parsed, known: bool, rgb: bool) -> Result<u32, String> {
     if known {
         if a.chroma != "444" || !matches!(raw.chroma, "420" | "422") {
             return Err(format!(
@@ -369,7 +399,11 @@ fn compare(a: &Parsed, b: &Parsed, raw: &Parsed, known: bool) -> Result<u32, Str
                 continue;
             }
             if let Some(d) = plane_diff(x, y, k) {
-                return Err(d);
+                // libheif-444-rgb: libheif's luma went through RGB; allow RGB_TOL, never a size change
+                let (m, cnt) = max_diff(x, y);
+                if !(rgb && k == 0 && (x.w, x.h, x.bps) == (y.w, y.h, y.bps) && m <= RGB_TOL) {
+                    return Err(format!("{d} (max |diff| {m}, {cnt} samples)"));
+                }
             }
             n += 1;
         }
@@ -446,13 +480,19 @@ pub fn run_cmp(args: &[String]) {
         .collect();
     // (name, id) -> reason; the value is set to true once the entry was compared
     let mut known: BTreeMap<(String, u32), bool> = BTreeMap::new();
+    // the rows whose reason is libheif-444-rgb (luma within RGB_TOL)
+    let mut rgb: BTreeSet<(String, u32)> = BTreeSet::new();
     for l in fs::read_to_string(known_tsv).unwrap_or_default().lines() {
         let mut f = l.split('\t');
-        let (Some(n), Some(Ok(id))) = (f.next(), f.next().map(str::parse::<u32>)) else {
+        let (Some(n), Some(Ok(id)), reason) = (f.next(), f.next().map(str::parse::<u32>), f.next())
+        else {
             continue;
         };
         if !n.starts_with('#') {
             known.insert((n.to_string(), id), false);
+            if reason == Some("libheif-444-rgb") {
+                rgb.insert((n.to_string(), id));
+            }
         }
     }
     let mut c = Counts::default();
@@ -513,7 +553,8 @@ pub fn run_cmp(args: &[String]) {
                     let rawb = fs::read(rd.join(format!("{id}.planes"))).unwrap_or_default();
                     match (parse_planes(&a), parse_planes(&b), parse_planes(&rawb)) {
                         (Some(pa), Some(pb), Some(pr)) => {
-                            compare(&pa, &pb, &pr, is_known).map(|n| (n, is_known))
+                            compare(&pa, &pb, &pr, is_known, rgb.contains(&(name.clone(), id)))
+                                .map(|n| (n, is_known))
                         }
                         _ => Err("unreadable .planes file".into()),
                     }
@@ -565,7 +606,7 @@ pub fn run_cmp(args: &[String]) {
          | transform: images compared | {} |\n\
          | transform: planes compared | {} |\n\
          | transform: exact matches (planes or the same error) | {} |\n\
-         | transform: known differences (libheif-444: luma and alpha exact, chroma skipped) | {} |\n\
+         | transform: known differences (libheif-444: luma and alpha exact, chroma skipped; libheif-444-rgb: luma within 3) | {} |\n\
          | transform: failures | {} |\n",
         c.visited,
         c.inputs,
