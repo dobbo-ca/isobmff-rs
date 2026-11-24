@@ -103,7 +103,7 @@ licence = "README.md:31: \"All image files in this repository are licensed under
 # the mp4parse-rust AVIF files above are in gate 5 too (they have a `moov`).
 # Skipped on purpose: the 12 FileFormatConformance segment files that have no `moov` (they need
 # their init file in front: mp4-live-LastTime-depRep-R*-000*.mp4, hev1_clg1_segment.m4s,
-# DDF_10s_25fps-dynamic_rep-R*_seg-0005.3gs; PR D reads fragments), the two FFC `.mp4.zip` files of
+# DDF_10s_25fps-dynamic_rep-R*_seg-0005.3gs; joining init and segment is not done), the two FFC `.mp4.zip` files of
 # more than 4 GB, the 6 RA_BodeMuseum files (CC BY-NC-ND), and mp4parse-rust `bipbop*` (no grant).
 
 # FFC has no AV1 MP4. The `.mp4` sparse patterns match files at any depth below the two dirs.

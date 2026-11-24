@@ -1057,7 +1057,13 @@ fn mp4_text<R: Read + Seek>(
             let _ = writeln!(o, "skip {} entry", t.id);
             continue;
         }
-        let moov_samples = all.iter().filter(|s| s.flags.is_none()).count() as u64;
+        let moov_samples = t
+            .tables
+            .iter()
+            .find(|(k, _)| matches!(&k.0, b"stsz" | b"stz2"))
+            .and_then(|(_, e)| box_payload(data, *e))
+            .and_then(|p| be32(p, 8))
+            .map_or(0, u64::from);
         let mut mk = mask(t, data, moov_samples);
         // A fragmented track with a negative cto: ffmpeg's dts_shift is not cancelled for the
         // samples of a `trun` (mov.c:5179), so its pts differ.

@@ -589,7 +589,7 @@ pub mod __fuzz {
         super::ftyp::parse(data, &budget).map(|_| ())
     }
 
-    /// `parse_movie`, then for every track a walk of all samples, `sync_samples(4)` and
+    /// `parse_movie`, then for every track a walk of all samples, `sync_samples(4)` (for a fragmented file only on tracks of at most 65 536 samples) and
     /// `sync_sample_at` at `i64::MIN`, 0 and `i64::MAX`, all over `Cursor::new(data)`.
     ///
     /// # Errors
@@ -602,8 +602,10 @@ pub mod __fuzz {
             let walk = t.samples(std::io::Cursor::new(data), limits, &cancel);
             let _ = walk.take(1 << 16).take_while(Result::is_ok).count();
             // Fragment runs can overlap, so a walk to the end is bounded only by the cancel flag.
-            if t.sample_count <= 1 << 16 {
+            if t.sample_count <= 1 << 16 || !m.fragmented {
                 let _ = t.sync_samples(std::io::Cursor::new(data), 4, limits, &cancel);
+            }
+            if t.sample_count <= 1 << 16 {
                 for at in [i64::MIN, 0, i64::MAX] {
                     let _ = t.sync_sample_at(std::io::Cursor::new(data), at, limits, &cancel);
                 }

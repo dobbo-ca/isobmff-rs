@@ -7,6 +7,7 @@
 use super::stbl::Table;
 use super::{Track, keep, push};
 use crate::boxes::{BoxHeader, Boxes, Ctx, Cur, be32, full_header};
+use crate::budget::Budget;
 use crate::{Error, Extent, FourCc};
 
 /// `trex`: the defaults of one track.
@@ -266,6 +267,7 @@ fn parse_traf(
     moof: u64,
     implicit: &mut u64,
     tracks: &mut [Track],
+    index: &[(u32, usize)],
     other: &mut Vec<(FourCc, Extent)>,
 ) -> Result<(), Error> {
     let mut boxes = Boxes::new(ctx, h.payload(), 2, false)?;
@@ -274,7 +276,12 @@ fn parse_traf(
         .filter(|c| &c.kind.0 == b"tfhd")
         .ok_or(Error::Malformed("traf"))?;
     let tf = parse_tfhd(ctx.slice(first.payload())?)?;
-    let Some(t) = tracks.iter_mut().find(|t| t.id == tf.id) else {
+    let at = index.partition_point(|&(id, _)| id < tf.id);
+    let found = index
+        .get(at)
+        .filter(|&&(id, _)| id == tf.id)
+        .and_then(|&(_, i)| tracks.get_mut(i));
+    let Some(t) = found else {
         return keep(ctx.budget, other, h);
     };
     let trex = t.trex.ok_or(Error::Malformed("trex"))?;
@@ -327,6 +334,23 @@ fn parse_traf(
     Ok(())
 }
 
+/// (id, index) of every track sorted by id then index, charged to the budget: `parse_traf` finds
+/// a track by binary search. The caller gives the charge back (`index_bytes`) after the `moof`s.
+pub(super) fn track_index(
+    budget: &Budget<'_>,
+    tracks: &[Track],
+) -> Result<Vec<(u32, usize)>, Error> {
+    let mut v = budget.vec(tracks.len())?;
+    v.extend(tracks.iter().enumerate().map(|(i, t)| (t.id, i)));
+    v.sort_unstable();
+    Ok(v)
+}
+
+/// Bytes `track_index` charged for `n` tracks.
+pub(super) fn index_bytes(n: usize) -> usize {
+    n.saturating_mul(size_of::<(u32, usize)>())
+}
+
 /// `moof` (depth 0 box): every `traf` adds runs to its track; the other children are appended to
 /// `other`. A `moof` in a file whose `moov` has no `mvex` is `Malformed("mvex")`.
 pub(super) fn parse_moof(
@@ -334,6 +358,7 @@ pub(super) fn parse_moof(
     h: &BoxHeader,
     fragmented: bool,
     tracks: &mut [Track],
+    index: &[(u32, usize)],
     other: &mut Vec<(FourCc, Extent)>,
 ) -> Result<(), Error> {
     if !fragmented {
@@ -343,7 +368,7 @@ pub(super) fn parse_moof(
     let mut boxes = Boxes::new(ctx, h.payload(), 1, false)?;
     while let Some(c) = boxes.next_box()? {
         if &c.kind.0 == b"traf" {
-            parse_traf(ctx, &c, h.start, &mut implicit, tracks, other)?;
+            parse_traf(ctx, &c, h.start, &mut implicit, tracks, index, other)?;
         } else {
             keep(ctx.budget, other, &c)?;
         }

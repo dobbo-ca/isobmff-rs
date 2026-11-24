@@ -283,9 +283,11 @@ pub fn parse_movie(data: &[u8], limits: &Limits, cancel: &AtomicBool) -> Result<
         }
     }
     if let Some(m) = top.moov.as_mut() {
+        let index = frag::track_index(&budget, &m.tracks)?;
         for h in &top.moofs {
-            frag::parse_moof(&ctx, h, m.fragmented, &mut m.tracks, &mut top.other)?;
+            frag::parse_moof(&ctx, h, m.fragmented, &mut m.tracks, &index, &mut top.other)?;
         }
+        budget.release(frag::index_bytes(index.len()));
     }
     let stats = Stats {
         boxes: ctx.boxes.get(),
@@ -304,7 +306,7 @@ pub fn parse_movie(data: &[u8], limits: &Limits, cancel: &AtomicBool) -> Result<
 /// # Errors
 ///
 /// Those of [`parse_movie`], and [`Error::LimitExceeded`] with `Limit::MoovBytes` for a larger
-/// `moov` (or `ftyp`); [`Error::Truncated`] when the reader ends early; [`Error::Io`] for another
+/// `moov` or `moof` (or `ftyp`); [`Error::Truncated`] when the reader ends early; [`Error::Io`] for another
 /// I/O error.
 pub fn read_movie<R: Read + Seek>(
     mut r: R,
@@ -368,6 +370,7 @@ pub fn read_movie<R: Read + Seek>(
         pos = h.end;
     }
     if let Some(m) = top.moov.as_mut() {
+        let index = frag::track_index(&budget, &m.tracks)?;
         for h in &top.moofs {
             let len = copy_len(h.end.saturating_sub(h.start), limits)?;
             let bytes = read_vec(&mut r, &budget, h.start, len)?;
@@ -379,11 +382,12 @@ pub fn read_movie<R: Read + Seek>(
             let ctx = Ctx::new(&src, &budget, limits);
             ctx.boxes.set(walk.boxes.get());
             ctx.max_depth.set(walk.max_depth.get());
-            frag::parse_moof(&ctx, h, m.fragmented, &mut m.tracks, &mut top.other)?;
+            frag::parse_moof(&ctx, h, m.fragmented, &mut m.tracks, &index, &mut top.other)?;
             walk.boxes.set(ctx.boxes.get());
             walk.max_depth.set(ctx.max_depth.get());
             budget.release(len);
         }
+        budget.release(frag::index_bytes(index.len()));
     }
     let stats = Stats {
         boxes: walk.boxes.get(),

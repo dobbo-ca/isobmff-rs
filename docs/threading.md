@@ -8,7 +8,7 @@ Why:
 
 - A parse is a short serial walk over box headers and small tables. It does not touch pixel data
   (`mdat` is skipped), so there is nothing worth splitting.
-- `read` copies only `ftyp` and `meta` (at most `max_meta_bytes`) and seeks over `mdat`; `read_movie` copies `ftyp` and `moov` (at most `max_moov_bytes`).
+- `read` copies only `ftyp` and `meta` (at most `max_meta_bytes`) and seeks over `mdat`; `read_movie` copies `ftyp`, `moov` and then each `moof` in turn (each at most `max_moov_bytes`).
 - Output is the same for every `max_threads` value; parity gate 3 checks `--threads 1` against
   the default.
 
