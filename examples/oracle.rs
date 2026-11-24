@@ -928,7 +928,7 @@ struct Mask {
     dts: bool,
 }
 
-fn mask(t: &Track, d: &[u8]) -> Mask {
+fn mask(t: &Track, d: &[u8], moov_samples: u64) -> Mask {
     let mut m = Mask::default();
     for (kind, e) in &t.tables {
         let Some(p) = box_payload(d, *e) else {
@@ -954,7 +954,7 @@ fn mask(t: &Track, d: &[u8]) -> Mask {
                     m.pts |= count == 0 || count >= 1 << 31 || off.unsigned_abs() > 1 << 28;
                     total += u64::from(count);
                 }
-                m.pts |= total < t.sample_count;
+                m.pts |= total < moov_samples;
             }
             _ => {}
         }
@@ -996,15 +996,13 @@ fn mp4_text<R: Read + Seek>(
         m.tracks.len(),
         u8::from(m.fragmented)
     );
-    // Files whose samples ffprobe does not read from the `moov` tables alone (docs/parity.md).
+    // Files whose samples ffprobe does not read from the `moov` tables and the fragments
+    // (docs/parity.md).
     let whole = if m.ftyp.as_ref().is_some_and(|f| f.major.0 == *b"avif") {
         // ffmpeg reads the primary item of `iloc` as the only packet. Where `meta` precedes `moov`,
         // `iloc` sets found_moov and the real `moov` is skipped as a duplicate (`mov.c:1147`,
         // `1178-1183`, `7523-7640`); where `moov` comes first the header read fails (`4470`).
         Some("avif")
-    } else if m.other_boxes.iter().any(|(k, _)| k.0 == *b"moof") {
-        // Fragments are not read yet; PR D removes this skip.
-        Some("fragmented")
     } else {
         None
     };
@@ -1059,14 +1057,43 @@ fn mp4_text<R: Read + Seek>(
             let _ = writeln!(o, "skip {} entry", t.id);
             continue;
         }
-        let mk = mask(t, data);
+        let moov_samples = t
+            .tables
+            .iter()
+            .find(|(k, _)| matches!(&k.0, b"stsz" | b"stz2"))
+            .and_then(|(_, e)| box_payload(data, *e))
+            .and_then(|p| be32(p, 8))
+            .map_or(0, u64::from);
+        let mut mk = mask(t, data, moov_samples);
+        // A fragmented track with a negative cto: ffmpeg's dts_shift is not cancelled for the
+        // samples of a `trun` (mov.c:5179), so its pts differ.
+        mk.pts |= moov_samples < t.sample_count && all.iter().any(|s| s.cto < 0);
+        // A fragment sample with depends_on = 1 is not a keyframe for ffmpeg (mov.c:5198-5203).
+        let dep = |s: &isobmff::Sample| s.sync && s.flags.is_some_and(|f| f & 0x0100_0000 != 0);
+        let any_dep = all.iter().any(dep);
         let first = all.first().map_or(0, |s| s.dts);
-        for s in &all {
-            let _ = write!(
-                o,
-                "s {} {} {} {} ",
-                t.id, s.number, s.range.offset, s.range.length
+        // ffmpeg cuts a packet at the end of the top-level box that
+        // holds its first byte (mov.c:7840-7846, 8775-8777), so the size of a fragment sample
+        // that runs past that box differs.
+        let top = boxes_in(data, 0, data.len());
+        let cut = |s: &isobmff::Sample| {
+            let (st, e) = (
+                s.range.offset,
+                s.range.offset.saturating_add(s.range.length),
             );
+            s.number > moov_samples
+                && top.iter().any(|&(b, n, _)| {
+                    let (b, n) = (b as u64, n as u64);
+                    b <= st && st < b + n && e > b + n
+                })
+        };
+        for s in &all {
+            let _ = write!(o, "s {} {} {} ", t.id, s.number, s.range.offset);
+            if cut(s) {
+                o.push_str("- ");
+            } else {
+                let _ = write!(o, "{} ", s.range.length);
+            }
             if mk.dts {
                 o.push_str("- ");
             } else {
@@ -1077,7 +1104,7 @@ fn mp4_text<R: Read + Seek>(
             } else {
                 let _ = write!(o, "{} ", s.pts());
             }
-            o.push(if mk.key {
+            o.push(if mk.key || dep(s) {
                 '-'
             } else if s.sync {
                 'K'
@@ -1103,7 +1130,7 @@ fn mp4_text<R: Read + Seek>(
                 pts
             };
             let _ = write!(o, "at {} {} ", t.id, j);
-            if mk.pts || mk.key {
+            if mk.pts || mk.key || any_dep {
                 o.push_str("-\n");
                 continue;
             }

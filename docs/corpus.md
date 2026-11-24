@@ -36,7 +36,7 @@ Also in gate 5, from the HEIF sources above: the animated AVIF files of libavif 
 
 Not used in gate 5: the 12 FFC segment files that have no `moov` (`mp4-live-LastTime-depRep-R*-000*.mp4`,
 `hev1_clg1_segment.m4s`, `DDF_10s_25fps-dynamic_rep-R*_seg-0005.3gs`; they need their init file in front, and
-fragments are the next step), the two FFC `.mp4.zip` files of more than 4 GB (the only `co64` files), the 6
+fragments are gated since PR D; joining init and segment is not done), the two FFC `.mp4.zip` files of more than 4 GB (the only `co64` files), the 6
 RA_BodeMuseum files, mp4parse-rust `bipbop*` (Apple content, no grant). Not usable on licence: FFmpeg FATE
 (no licence; best edit-list cases), Chromium `media/test/data` (no per-file grant), gpac testsuite, Bento4
 `Test/Data` (GPL), libheif sequence files (no data grant). `fetch.sh` passes the exclude globs of an LFS

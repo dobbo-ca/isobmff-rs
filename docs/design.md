@@ -378,13 +378,14 @@ pub struct Image {
 
 ## MP4/MOV tracks (`movie/`)
 
-isobmff-rs finds keyframes in MP4, MOV, 3GP and AVIS image sequences, so that hevc-rs and av1-rs can decode one and Drive can build a thumbnail. For a track it gives the codec configuration and the byte ranges of its first N sync samples, or of the sync sample nearest a time. It decodes no samples. `parse` and `read` (the HEIF item graph) are unchanged: `moov` stays "noted" there. A caller who wants both the item graph and the tracks of an AVIS file calls both. This version reads `moov` of non-fragmented files; `mvex` sets `Movie::fragmented` and `moof` boxes stay in `Movie::other_boxes`. Fragments are the next step (below).
+isobmff-rs finds keyframes in MP4, MOV, 3GP and AVIS image sequences, so that hevc-rs and av1-rs can decode one and Drive can build a thumbnail. For a track it gives the codec configuration and the byte ranges of its first N sync samples, or of the sync sample nearest a time. It decodes no samples. `parse` and `read` (the HEIF item graph) are unchanged: `moov` stays "noted" there. A caller who wants both the item graph and the tracks of an AVIS file calls both. It reads `moov` and the movie fragments (`moof`) of fragmented files ("Fragmented MP4", below); `mvex` sets `Movie::fragmented`.
 
 ```
 src/movie/
   mod.rs      Movie, Track, SampleEntry, Edit, Sample, parse_movie, read_movie, the moov/trak/mdia/minf/stbl/stsd parse
   stbl.rs     table headers: version, count, byte range, count checked against the payload
-  walk.rs     the sample walk: Samples, Track::samples, sync_samples, sync_sample_at
+  frag.rs     trex, tfhd, tfdt, trun: one record per run, kept as ranges
+  walk.rs     the sample walk (moov samples, then fragment runs): Samples, Track::samples, sync_samples, sync_sample_at
 ```
 
 ### Entry points and types
@@ -415,7 +416,7 @@ pub struct Track {
     pub timescale: u32, pub duration: u64,   // mdhd; timescale 0 is kept, callers check it before dividing
     pub entries: Vec<SampleEntry>,           // stsd children, index i+1 = sample description index
     pub edits: Vec<Edit>,                    // elst entries, empty without elst
-    pub sample_count: u64,                   // stsz/stz2 count
+    pub sample_count: u64,                   // stsz/stz2 count + every fragment run count
     pub tables: Vec<(FourCc, Extent)>,       // the parsed stbl tables, whole box (stts ctts stss stsc stsz stz2 stco co64)
     pub other_boxes: Vec<(FourCc, Extent)>,  // every box under trak not parsed, whole box
     /* private: table ranges and counts */
@@ -431,10 +432,10 @@ impl SampleEntry { pub fn config(&self) -> Option<&Property>; } // first child o
 pub struct Edit { pub segment_duration: u64, pub media_time: i64, pub rate_integer: i16, pub rate_fraction: i16 }
 
 pub struct Sample {
-    pub number: u64,         // 1-based decode order
+    pub number: u64,         // 1-based decode order: moov samples, then fragment samples in file order
     pub range: Extent,       // absolute file range of the sample bytes
     pub dts: i64,            // decode time, media timescale, no edit list
-    pub cto: i32,            // composition offset (ctts), 0 when there is none
+    pub cto: i32,            // composition offset (ctts or trun), 0 when there is none
     pub sync: bool,
     pub entry: u32,          // sample description index (1-based) into Track::entries
     pub flags: Option<u32>,  // resolved fragment sample_flags; None for moov samples
@@ -461,7 +462,8 @@ impl Track {
 - **moov count.** No `moov` is `Error::NoMoov` (class `no-moov`). Two `moov` boxes are `Malformed("moov")`.
 - **cmov.** A `cmov` (compressed moov) is `Unsupported("cmov")`.
 - **Damaged tail.** After `moov`, a top-level box with an incomplete header or one that runs past the end of the file ends the walk, as in HEIF. Before `moov` it is `Truncated`.
-- **other_boxes.** Every other top-level box goes into `Movie::other_boxes` where it is met, and so does each `moov` child that is not parsed, at the place of `moov` in the file order: `mdat`, `free`, `meta`, `udta`, `mvex`, `moof`, `sidx`, `styp`, `uuid`, and so on.
+- **other_boxes.** Every other top-level box goes into `Movie::other_boxes` where it is met, and so does each `moov` child that is not parsed, at the place of `moov` in the file order: `mdat`, `free`, `meta`, `udta`, `mvex`, `sidx`, `styp`, `uuid`, and so on. The `moof` boxes are parsed, not listed; their children that are not parsed come last.
+- **moof.** Every top-level `moof` is parsed after `moov`, in file order. A `moof` inside `moov` (a `moov` that swallowed the top-level boxes after it) is `Malformed("moov")`.
 
 ### Boxes parsed and boxes kept raw
 
@@ -497,7 +499,7 @@ Tables are not decoded into Vecs. At parse time each table's FullBox version and
 
 - **On failure.** Any other version, or a count that does not fit, is `Malformed(<4cc>)`. Trailing bytes are allowed.
 - **What the Track keeps.** Only the `Extent` of the entries and the count. So a track costs O(1) memory whatever its sample count, and no allocation is sized from a count before the bytes exist.
-- **Walks.** One walk (one `samples`, `sync_samples` or `sync_sample_at` call) keeps a forward window per table: `stts`, `ctts`, `stss`, `stsc`, the sizes and the chunk offsets. A window holds at most 4 KiB of its table, read with `read_at` when a read leaves it, and the 6 windows are charged to `max_alloc` once per walk (a table smaller than 4 KiB costs its size).
+- **Walks.** One walk (one `samples`, `sync_samples` or `sync_sample_at` call) keeps a forward window per table: `stts`, `ctts`, `stss`, `stsc`, the sizes and the chunk offsets. A window holds at most 4 KiB of its table, read with `read_at` when a read leaves it, and the 7 windows (the seventh holds the `trun` records of the current fragment run) are charged to `max_alloc` once per walk (a table smaller than 4 KiB costs its size).
 - **Cost.** A walk reads only the table bytes it passes over. Skipping uses run lengths (below), so `stsz` is read only for the samples of the target chunks.
 - **Cancel.** The flag is checked at walk start, whenever a window is refilled (at least every 4096 table bytes) and every 4096 samples.
 
@@ -530,7 +532,7 @@ Tables are not decoded into Vecs. At parse time each table's FullBox version and
   - `stss` present: a sample is sync when its number is listed. Entries must be at least 1 and strictly increasing, else `Malformed("stss")` (met when the walk reads that entry). Entries past `sample_count` are ignored.
   - An empty `stss` means no sync samples.
   - `stps`, `sdtp` and `sbgp 'rap '` are kept raw and do not set `sync`.
-- **sync_samples(n).** Walks `stss` and skips to each listed sample, or takes samples 1..n when there is no `stss`. The Vec is charged for `min(n, sync count)`.
+- **sync_samples(n).** Walks `stss` and skips to each listed sample, or takes samples 1..n when there is no `stss`; then the fragment samples that are sync. The Vec is charged for `min(n, listed or all moov samples + fragment samples)`.
 - **sync_sample_at(t).** `t` is in the track's media timescale, on the raw composition timeline (`pts = dts + cto`, no edit list).
   - It returns the sync sample with the greatest `pts <= t`; ties go to the lowest number.
   - When no sync sample has `pts <= t`, it returns the lowest-numbered sync sample. It returns `None` when the track has no sync sample.
@@ -541,17 +543,34 @@ Tables are not decoded into Vecs. At parse time each table's FullBox version and
 
 - **Top level.** It walks top-level headers as `read` does, seeking over `mdat`.
 - **moov.** It copies the whole `moov` (at most `Limits::max_moov_bytes`, charged while it is parsed, then given back) and parses it with the same `Ctx`/`Boxes` code over a `Src` with `base = moov start`, sharing the box counter. The `ftyp` payload is copied under the same cap.
+- **moof.** It records the header of every top-level `moof`, then copies and parses each one after the walk (see "Fragmented MP4").
 - **Equality.** The `Movie` is equal to `parse_movie` on the same bytes, `stats` included. Sample walks read only table windows and need the reader again.
 
 ### Limits and errors
 
-`max_moov_bytes` (64 MiB; `Limit::MoovBytes`, class `limit-moov-bytes`) caps the `moov` box that `read_movie` copies. The 64 MiB default is an estimate: a 2-hour 60 fps file with B-frames and AAC has about 10 MB of `moov`. The existing limits also apply: `max_boxes` and `max_depth` to the `moov` walk, `max_properties` to the children of sample entries (all entries together), `max_alloc` to tracks, entries, properties, edits, `other_boxes`, the `dref` flags, the walk windows and the `sync_samples` Vec (the growing Vecs use the doubling-charged pattern of `meta/mod.rs`), and the cancel flag to boxes and walks. A walk allocates nothing whose size comes from the input; its time is bounded by the table bytes in the file, `sample_count` (at most chunks x file size) and the cancel flag.
+`max_moov_bytes` (64 MiB; `Limit::MoovBytes`, class `limit-moov-bytes`) caps the `moov` box, and each `moof` box, that `read_movie` copies. The 64 MiB default is an estimate: a 2-hour 60 fps file with B-frames and AAC has about 10 MB of `moov`. The existing limits also apply: `max_boxes` and `max_depth` to the `moov` walk, `max_properties` to the children of sample entries (all entries together), `max_alloc` to tracks, entries, properties, edits, `other_boxes`, the `dref` flags, the `trex` list, the `moof` headers, the fragment runs, the walk windows and the `sync_samples` Vec (the growing Vecs use the doubling-charged pattern of `meta/mod.rs`), and the cancel flag to boxes and walks. A walk allocates nothing whose size comes from the input; its time is bounded by the table bytes in the file, `sample_count` (at most chunks x file size for `moov` samples; fragment run counts are bounded only by the cancel flag, see Fragmented MP4) and the cancel flag.
 
-`Error::NoMoov` is new. Tokens used with `Malformed`: `moov mvhd tkhd mdhd hdlr stbl stsd stts ctts stss stsc stsz stz2 stco co64 elst dref`. `Unsupported`: `cmov`, `data reference`. A sample past the end of the file is `Truncated`.
+`Error::NoMoov` is new. Tokens used with `Malformed`: `moov mvhd tkhd mdhd hdlr stbl stsd stts ctts stss stsc stsz stz2 stco co64 elst dref mvex trex traf tfhd tfdt trun`. `Unsupported`: `cmov`, `data reference`. A sample past the end of the file is `Truncated`.
 
-### Fragmented MP4 (next step, not in this version)
+### Fragmented MP4
 
-`mvex` is kept raw in `Movie::other_boxes` and sets `fragmented`; `moof` boxes are kept raw too. The next version reads `trex`, `tfhd`, `tfdt` and `trun` into per-run records (O(1) memory per run), continues the walks after the `moov` samples through the runs in file order, and fills `Sample::flags`.
+`moov` with `mvex` makes the file fragmented (`Movie::fragmented`). Every top-level `moof` is parsed after `moov` and the walk of the top-level boxes (so a `moof` before `moov` works), in file order. `parse_movie` and `read_movie` give equal `Movie` values: `read_movie` collects the `moof` headers (charged), then copies each `moof` in turn (at most `max_moov_bytes`, charged, given back after the parse) and parses it with a `Src` whose `base` is the `moof` start, sharing the box counters. Nothing is copied or kept per sample.
+
+- **Precondition.** A `moof` when `moov` has no `mvex` is `Malformed("mvex")`.
+- **trex.** One per track id, read from the `trex` children of `mvex`; `mvex` itself stays in `Movie::other_boxes`. A duplicate is `Malformed("trex")`. A `traf` of a track in `moov` that has no `trex` is `Malformed("trex")`. A `trex` of an unknown track is ignored.
+- **moof.** Children other than `traf` (`mfhd`, `pssh`, ...) go to `Movie::other_boxes`, after the boxes of the top-level walk.
+- **traf.** `tfhd` must be the first child (else `Malformed("traf")`); its track id is not 0 (`Malformed("tfhd")`). A `traf` of a track id that is not in `moov` is kept whole in `Movie::other_boxes`. `tfdt` (v0 u32, v1 u64, above `i64::MAX` is `Malformed("tfdt")`) applies to the first run of the `traf` when it comes before that run. Each `trun` is a run. Other children go to the `other_boxes` of the track.
+- **tfhd flags.** `0x01` base_data_offset (u64), `0x02` sample description index, `0x08` default duration, `0x10` default size, `0x20` default flags, `0x020000` default-base-is-moof. The description index (tfhd, else trex) must be in `1..=entries` (else `Malformed("tfhd")`).
+- **Base offset.** The explicit base when present. Else the `moof` start with default-base-is-moof. Else where the data of the last run of this `moof` ended (the `moof` start before any run), as ffmpeg does (`implicit_offset`, `mov.c:1435`, `5288`).
+- **Run start.** `base + data_offset` (i32, checked: overflow is `Malformed("trun")`) when trun flag `0x01` is set, else the end of the previous run of this `traf` (the base for the first run). ffmpeg restarts at the base for every `trun` without data_offset, so a `traf` with several such runs differs (a known difference, docs/parity.md).
+- **trun.** v0 and v1. Flags: `0x01` data_offset, `0x04` first_sample_flags, `0x100` duration, `0x200` size, `0x400` flags, `0x800` cto (i32 for both versions). The record has 4 bytes per field present, and `count x record <= payload left` (else `Malformed("trun")`). With no size field and a default size of 0 a run of 1 or more samples is `Malformed("trun")` (a run whose length the file could not bound).
+- **Field resolution.** Duration, size and cto come from the record, else (duration, size) from tfhd, else trex. The flags of a sample come from the record, else (sample 0) first_sample_flags, else tfhd, else trex. `Sample::sync` is `flags & 0x0001_0000 == 0`; `Sample::flags` holds the resolved value.
+- **Run dts.** The `tfdt` for the first run of a `traf` that has one, else the end of the previous run of the track (any `moof`), starting at the sum of the `stts` deltas of `moov` (a track with no `moov` samples starts at 0). Past `i64::MAX` is `Malformed("trun")`.
+- **What parse keeps.** Per non-empty `trun`, a private record of about 80 bytes (start offset, first dts, the `Extent` of the per-sample records, count, flags, the resolved defaults, the description index), charged with the doubling pattern. Parse reads each record range once, to sum durations and sizes (O(1) memory, cancel every 4096 records); a run without per-sample duration and size costs O(1). `Track::sample_count` is the `moov` count plus the counts of all runs.
+- **Walks.** `samples`, `sync_samples` and `sync_sample_at` continue after the `moov` samples through the runs in file order. A walk has one more window (4 KiB at most, charged at the start) for the records of the current run. A fragment sample past the end of the file is `Truncated`. `sync_samples` takes the `stss`-listed (or all) `moov` samples, then the fragment samples whose flags say sync; `sync_sample_at` treats both kinds alike.
+- **Time.** A walk to the end visits every sample; runs may overlap, so a hostile file can make that long (only the cancel flag bounds it). The fuzz target walks to the end only for tracks with at most 65 536 samples.
+- **Kept raw.** `mfra`/`tfra`, `sidx`, `mehd`, `sdtp`, `senc` and the other boxes are kept raw and not used.
+- **Errors.** Tokens `mvex trex traf tfhd tfdt trun`.
 
 ## Limits
 
@@ -572,7 +591,7 @@ variant: `Error::LimitExceeded(Limit::X)`.
 | `max_pixels` | 1 << 30 (32768 x 32768) | ispe width x height, grid and iovl output width x height | max_image_size_pixels 32768 x 32768 |
 | `max_meta_bytes` | 64 MiB | size of the `meta` or `mini` box that `read` copies | - |
 | `max_metadata_bytes` | 64 MiB | one Exif or XMP item (bytes) that `metadata()` returns | max_memory_block_size 4 GiB |
-| `max_moov_bytes` | 64 MiB | size of the `moov` box (and `ftyp` payload) that `read_movie` copies | - |
+| `max_moov_bytes` | 64 MiB | size of the `moov` box, of each `moof` box (and of the `ftyp` payload) that `read_movie` copies | - |
 
 Why these values: real phone files have 48 dimg references from one grid (iPhone 48 MP, 8 x 6
 tiles of 512), plus thumbnails, depth, gain map and its own grid; 200 MP phone files have about

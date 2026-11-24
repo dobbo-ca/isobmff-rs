@@ -1241,12 +1241,118 @@ pub fn movie_two_tracks() -> Vec<u8> {
     )
 }
 
+// ---- fragmented MP4 ----
+
+/// `trex`: the defaults of track `id`.
+pub fn trex(id: u32, desc: u32, dur: u32, size: u32, flags: u32) -> Vec<u8> {
+    fbx(b"trex", 0, 0, &be(&[id, desc, dur, size, flags]))
+}
+
+/// `tfhd` of track `id` with `flags` and the optional `fields` they announce, in order
+/// (base_data_offset is two words).
+pub fn tfhd(id: u32, flags: u32, fields: &[u32]) -> Vec<u8> {
+    fbx(b"tfhd", 0, flags, &be(&[&[id][..], fields].concat()))
+}
+
+/// `tfdt`, version 0 (32 bits) or 1 (64 bits).
+pub fn tfdt(version: u8, t: u64) -> Vec<u8> {
+    let body = if version == 0 {
+        (t as u32).to_be_bytes().to_vec()
+    } else {
+        t.to_be_bytes().to_vec()
+    };
+    fbx(b"tfdt", version, 0, &body)
+}
+
+/// `trun`: `sample_count`, then `head` (data_offset, first_sample_flags, as `flags` announces
+/// them), then the per-sample `records`.
+pub fn trun(version: u8, flags: u32, count: u32, head: &[u32], records: &[u32]) -> Vec<u8> {
+    fbx(
+        b"trun",
+        version,
+        flags,
+        &be(&[&[count][..], head, records].concat()),
+    )
+}
+
+pub fn traf(children: &[Vec<u8>]) -> Vec<u8> {
+    bx(b"traf", &children.concat())
+}
+
+/// `moof`: an `mfhd`, then the `traf` boxes.
+pub fn moof(trafs: &[Vec<u8>]) -> Vec<u8> {
+    bx(
+        b"moof",
+        &cat(&[&fbx(b"mfhd", 0, 0, &be(&[1])), &trafs.concat()]),
+    )
+}
+
+/// The offset of the first byte of the `mdat` payload of a file.
+pub fn mdat0(f: &[u8]) -> u64 {
+    f.windows(4).position(|w| w == b"mdat").unwrap() as u64 + 4
+}
+
+/// A fragmented file: `ftyp`, a `moov` with `tracks` video tracks (ids 1..) without samples and
+/// an `mvex` of `trexes`, the boxes that `moofs(moof_start, mdat_payload_start)` returns, then an
+/// `mdat` of 400 bytes. The result of `moofs` must have the same length for any arguments.
+pub fn frag_file(tracks: u32, trexes: &[Vec<u8>], moofs: impl Fn(u64, u64) -> Vec<u8>) -> Vec<u8> {
+    let ftyp = bx(b"ftyp", b"isom\0\0\0\0isom");
+    let traks: Vec<Vec<u8>> = (1..=tracks)
+        .map(|id| Trak::video(id, &[stts(&[]), stsc(&[]), stsz(&[]), stco(&[])]).build())
+        .collect();
+    let m = moov(&traks, &[bx(b"mvex", &trexes.concat())]);
+    let start = (ftyp.len() + m.len()) as u64;
+    let len = moofs(0, 0).len() as u64;
+    let data: Vec<u8> = (0..400).map(|i| (i % 251) as u8).collect();
+    cat(&[
+        &ftyp,
+        &m,
+        &moofs(start, start + len + 8),
+        &bx(b"mdat", &data),
+    ])
+}
+
+/// Two fragmented tracks, two `moof` boxes. Track 1 (trex: 100 ticks, 10 bytes, flags 0): moof 1
+/// has `default-base-is-moof`, tfhd defaults (200 ticks, 20 bytes, flags 0x0200_0000), a run of
+/// 2 samples with `data_offset` and a run of 2 samples with per-sample duration and size and no
+/// `data_offset`; moof 2 has an explicit base, `tfdt` 5000 (version 1), a version 1 run with
+/// first_sample_flags, sizes and cto (-5, 3). Track 2 (trex: 100 ticks, 10 bytes, flags
+/// 0x10000) has one run of 2 samples with only the trex defaults, in moof 1, implicit base.
+pub fn movie_frag() -> Vec<u8> {
+    frag_file(
+        2,
+        &[trex(1, 1, 100, 10, 0), trex(2, 1, 100, 10, 0x10000)],
+        |moof_at, data| {
+            let a = traf(&[
+                tfhd(1, 0x2_0038, &[200, 20, 0x0200_0000]),
+                trun(0, 0x1, 2, &[(data - moof_at) as u32], &[]),
+                trun(0, 0x300, 2, &[], &[50, 7, 60, 8]),
+            ]);
+            let b = traf(&[tfhd(2, 0, &[]), trun(0, 0, 2, &[], &[])]);
+            let m1 = moof(&[a, b]);
+            let c = traf(&[
+                tfhd(1, 0x1, &[0, (data + 100) as u32]),
+                tfdt(1, 5000),
+                trun(
+                    1,
+                    0x1 | 0x4 | 0x200 | 0x800,
+                    2,
+                    &[4, 0x10000],
+                    &[6, -5i32 as u32, 7, 3],
+                ),
+            ]);
+            cat(&[&m1, &moof(&[c])])
+        },
+    )
+}
+
 /// Every sample movie file that parses, by name.
 pub fn all_movie_files() -> Vec<(&'static str, Vec<u8>)> {
     vec![
         ("runs", movie_runs()),
         ("sync", movie_sync()),
         ("two_tracks", movie_two_tracks()),
+        ("frag", movie_frag()),
     ]
 }
 

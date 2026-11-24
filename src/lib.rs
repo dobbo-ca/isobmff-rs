@@ -12,7 +12,7 @@
 //! tracks of an MP4, MOV, 3GP or AVIS file, with the codec configuration of each sample entry
 //! and the sample tables kept as ranges of the file. [`Track::sync_samples`] and
 //! [`Track::sync_sample_at`] give the byte ranges of keyframes for hevc-rs and av1-rs; no sample
-//! is decoded. Movie fragments (`moof`) are not read yet.
+//! is decoded. Fragmented files (`mvex`, `moof`) give their samples in the same walks.
 //!
 //! # Example
 //!
@@ -589,7 +589,7 @@ pub mod __fuzz {
         super::ftyp::parse(data, &budget).map(|_| ())
     }
 
-    /// `parse_movie`, then for every track a walk of all samples, `sync_samples(4)` and
+    /// `parse_movie`, then for every track a walk of all samples, `sync_samples(4)` (for a fragmented file only on tracks of at most 65 536 samples) and
     /// `sync_sample_at` at `i64::MIN`, 0 and `i64::MAX`, all over `Cursor::new(data)`.
     ///
     /// # Errors
@@ -601,7 +601,10 @@ pub mod __fuzz {
         for t in &m.tracks {
             let walk = t.samples(std::io::Cursor::new(data), limits, &cancel);
             let _ = walk.take(1 << 16).take_while(Result::is_ok).count();
-            let _ = t.sync_samples(std::io::Cursor::new(data), 4, limits, &cancel);
+            // Fragment runs can overlap, so a walk to the end is bounded only by the cancel flag.
+            if t.sample_count <= 1 << 16 || !m.fragmented {
+                let _ = t.sync_samples(std::io::Cursor::new(data), 4, limits, &cancel);
+            }
             if t.sample_count <= 1 << 16 {
                 for at in [i64::MIN, 0, i64::MAX] {
                     let _ = t.sync_sample_at(std::io::Cursor::new(data), at, limits, &cancel);

@@ -1,10 +1,11 @@
 //! The sample walk: sample number to chunk to file offset, with `stts`, `ctts` and `stss` read
-//! forward through small windows. A walk allocates six windows of at most 4 KiB, charged once,
-//! and nothing else.
+//! forward through small windows; fragment samples are read from the `trun` records the same way.
+//! A walk allocates seven windows of at most 4 KiB, charged once, and nothing else.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::frag::{Run, field_at, rec_len};
 use super::stbl::{SizeKind, Sizes, Stbl, Table};
 use super::{Sample, Track};
 use crate::budget::Budget;
@@ -39,6 +40,14 @@ impl<'a> Win<'a> {
             have: 0,
             cancel,
         })
+    }
+
+    /// Points the window at another table (the window then refills on the first read).
+    fn aim(&mut self, e: Extent) {
+        self.base = e.offset;
+        self.len = e.length;
+        self.at = 0;
+        self.have = 0;
     }
 
     /// `n` bytes (at most 16) at offset `rel` of the table. A read that leaves the window
@@ -467,6 +476,19 @@ pub(crate) struct Walk<'a> {
     cto: Option<Cto<'a>>,
     sync: Option<Stss<'a>>,
     ticks: u32,
+    /// The samples of `moov`; the numbers after it are fragment samples.
+    moov: u64,
+    /// The records of the current `trun`.
+    fwin: Win<'a>,
+    /// The current run of `Track::runs` and the samples already taken from it.
+    ri: usize,
+    k: u64,
+    /// The window is on run `ri`, `off` is the offset and `fdts` the decode time of its next sample.
+    loaded: bool,
+    off: u64,
+    fdts: i64,
+    /// The number of the next fragment sample.
+    fnext: u64,
 }
 
 impl<'a> Walk<'a> {
@@ -510,6 +532,15 @@ impl<'a> Walk<'a> {
             Some(tb) => Some(Stss::new(win(tb)?, tb.count)),
             None => None,
         };
+        let widest = t.runs.iter().map(|r| r.entries.length).max().unwrap_or(0);
+        let fwin = Win::new(
+            budget,
+            cancel,
+            Extent {
+                offset: 0,
+                length: widest,
+            },
+        )?;
         Ok(Self {
             t,
             cancel,
@@ -519,6 +550,14 @@ impl<'a> Walk<'a> {
             cto,
             sync,
             ticks: 0,
+            moov: table.count,
+            fwin,
+            ri: 0,
+            k: 0,
+            loaded: false,
+            off: 0,
+            fdts: 0,
+            fnext: table.count.saturating_add(1),
         })
     }
 
@@ -535,21 +574,17 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// Sample number `n` (1-based), which must come after the one asked before. Samples in
-    /// between are skipped without being read.
-    pub(crate) fn sample<R: Read + Seek>(&mut self, r: &mut R, n: u64) -> Result<Sample, Error> {
+    /// Checks the cancel flag every 4096 samples.
+    fn tick(&mut self) -> Result<(), Error> {
         self.ticks = self.ticks.wrapping_add(1);
         if self.ticks & TICK_MASK == 0 && self.cancel.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
-        let gap = n.saturating_sub(self.loc.n.saturating_add(1));
-        if gap > 0 {
-            self.loc.skip(r, gap)?;
-        }
-        let (off, size, desc) = self.loc.next_sample(r)?;
-        off.checked_add(size)
-            .filter(|&e| e <= self.file_len)
-            .ok_or(Error::Truncated)?;
+        Ok(())
+    }
+
+    /// The sample description `desc` must exist and be in this file.
+    fn check_desc(&self, desc: u32) -> Result<(), Error> {
         let entry = usize::try_from(desc.saturating_sub(1))
             .ok()
             .and_then(|i| self.t.entries.get(i))
@@ -562,6 +597,31 @@ impl<'a> Walk<'a> {
         if external {
             return Err(Error::Unsupported("data reference"));
         }
+        Ok(())
+    }
+
+    /// Sample number `n` (1-based), which must come after the one asked before. Samples in
+    /// between are skipped without being read (those of `moov`; fragment samples are read one by
+    /// one).
+    pub(crate) fn sample<R: Read + Seek>(&mut self, r: &mut R, n: u64) -> Result<Sample, Error> {
+        if n > self.moov {
+            loop {
+                let s = self.frag_next(r)?;
+                if s.number >= n {
+                    return Ok(s);
+                }
+            }
+        }
+        self.tick()?;
+        let gap = n.saturating_sub(self.loc.n.saturating_add(1));
+        if gap > 0 {
+            self.loc.skip(r, gap)?;
+        }
+        let (off, size, desc) = self.loc.next_sample(r)?;
+        off.checked_add(size)
+            .filter(|&e| e <= self.file_len)
+            .ok_or(Error::Truncated)?;
+        self.check_desc(desc)?;
         let dts = self.time.dts(r, n)?;
         let cto = match &mut self.cto {
             Some(c) => c.cto(r, n)?,
@@ -583,6 +643,79 @@ impl<'a> Walk<'a> {
             entry: desc,
             flags: None,
         })
+    }
+
+    /// The field `bit` of the record at `rel` of `run`, or `default` when records lack it.
+    fn field<R: Read + Seek>(
+        &mut self,
+        r: &mut R,
+        run: &Run,
+        rel: u64,
+        bit: u32,
+        default: u32,
+    ) -> Result<u32, Error> {
+        match field_at(run.flags, bit) {
+            Some(p) => {
+                let at = rel.checked_add(p as u64).ok_or(Error::Malformed("trun"))?;
+                self.fwin.u32_at(r, at)
+            }
+            None => Ok(default),
+        }
+    }
+
+    /// The next fragment sample.
+    fn frag_next<R: Read + Seek>(&mut self, r: &mut R) -> Result<Sample, Error> {
+        const BAD: Error = Error::Malformed("trun");
+        self.tick()?;
+        let run = loop {
+            let run = *self.t.runs.get(self.ri).ok_or(BAD)?;
+            if self.k < u64::from(run.count) {
+                break run;
+            }
+            self.ri = self.ri.saturating_add(1);
+            self.k = 0;
+            self.loaded = false;
+        };
+        if !self.loaded {
+            self.fwin.aim(run.entries);
+            self.off = run.start;
+            self.fdts = run.dts;
+            self.loaded = true;
+        }
+        let rel = self.k.checked_mul(rec_len(run.flags) as u64).ok_or(BAD)?;
+        let dur = self.field(r, &run, rel, 0x100, run.dur)?;
+        let size = u64::from(self.field(r, &run, rel, 0x200, run.size)?);
+        let default = if self.k == 0 {
+            run.first_flags.unwrap_or(run.sflags)
+        } else {
+            run.sflags
+        };
+        let flags = self.field(r, &run, rel, 0x400, default)?;
+        let cto = self.field(r, &run, rel, 0x800, 0)? as i32;
+        let end = self
+            .off
+            .checked_add(size)
+            .filter(|&e| e <= self.file_len)
+            .ok_or(Error::Truncated)?;
+        self.check_desc(run.desc)?;
+        let s = Sample {
+            number: self.fnext,
+            range: Extent {
+                offset: self.off,
+                length: size,
+            },
+            dts: self.fdts,
+            cto,
+            // `sample_is_non_sync_sample`.
+            sync: flags & 0x0001_0000 == 0,
+            entry: run.desc,
+            flags: Some(flags),
+        };
+        self.off = end;
+        self.fdts = self.fdts.checked_add(i64::from(dur)).ok_or(BAD)?;
+        self.k = self.k.saturating_add(1);
+        self.fnext = self.fnext.saturating_add(1);
+        Ok(s)
     }
 }
 
@@ -655,8 +788,9 @@ impl Track {
         }
     }
 
-    /// The first `n` sync samples, in sample order. Without `stss` every sample is a sync
-    /// sample. The result is charged for at most `min(n, sync sample count)` samples.
+    /// The first `n` sync samples, in sample order: the samples of `moov` (all of them without
+    /// `stss`), then the fragment samples whose flags say sync. The result is charged for at most
+    /// `min(n, samples that can be sync)` samples.
     ///
     /// # Errors
     ///
@@ -670,10 +804,9 @@ impl Track {
     ) -> Result<Vec<Sample>, Error> {
         let budget = Budget::new(limits, cancel);
         budget.check_cancel()?;
-        let bound = self
-            .st
-            .stss
-            .map_or(self.sample_count, |s| s.count.min(self.sample_count));
+        let moov = self.st.sizes.table.count;
+        let listed = self.st.stss.map_or(moov, |s| s.count.min(moov));
+        let bound = listed.saturating_add(self.sample_count.saturating_sub(moov));
         let want = usize::try_from(bound).unwrap_or(usize::MAX).min(n);
         let mut out = budget.vec::<Sample>(want)?;
         if want == 0 {
@@ -684,14 +817,24 @@ impl Track {
         while out.len() < want {
             let v = if w.has_stss() {
                 match w.next_listed(&mut r)? {
-                    Some(v) if v <= self.sample_count => v,
+                    Some(v) if v <= moov => v,
                     _ => break,
                 }
-            } else {
+            } else if next <= moov {
                 next
+            } else {
+                break;
             };
             out.push(w.sample(&mut r, v)?);
             next = next.saturating_add(1);
+        }
+        let mut v = moov.saturating_add(1);
+        while out.len() < want && v <= self.sample_count {
+            let s = w.sample(&mut r, v)?;
+            if s.sync {
+                out.push(s);
+            }
+            v = v.saturating_add(1);
         }
         Ok(out)
     }
@@ -700,6 +843,7 @@ impl Track {
     /// timescale, no edit list applied); the lowest number among equals. When no sync sample
     /// has `pts <= t`, the lowest-numbered sync sample. `None` when the track has no sync
     /// sample. It visits every sync sample, because composition times are not monotone.
+    /// Fragment samples count like the samples of `moov`.
     ///
     /// # Errors
     ///
@@ -716,27 +860,35 @@ impl Track {
         if self.sample_count == 0 {
             return Ok(None);
         }
+        let moov = self.st.sizes.table.count;
         let mut w = Walk::new(self, &mut r, &budget, cancel)?;
         let mut first: Option<Sample> = None;
         let mut best: Option<Sample> = None;
+        let mut consider = |s: Sample| {
+            if s.sync {
+                first.get_or_insert(s);
+                if s.pts() <= t && best.is_none_or(|b| s.pts() > b.pts()) {
+                    best = Some(s);
+                }
+            }
+        };
         let mut next: u64 = 1;
         loop {
             let v = if w.has_stss() {
                 match w.next_listed(&mut r)? {
-                    Some(v) if v <= self.sample_count => v,
+                    Some(v) if v <= moov => v,
                     _ => break,
                 }
-            } else if next <= self.sample_count {
+            } else if next <= moov {
                 next
             } else {
                 break;
             };
             next = next.saturating_add(1);
-            let s = w.sample(&mut r, v)?;
-            first.get_or_insert(s);
-            if s.pts() <= t && best.is_none_or(|b| s.pts() > b.pts()) {
-                best = Some(s);
-            }
+            consider(w.sample(&mut r, v)?);
+        }
+        for v in moov.saturating_add(1)..=self.sample_count {
+            consider(w.sample(&mut r, v)?);
         }
         Ok(best.or(first))
     }
