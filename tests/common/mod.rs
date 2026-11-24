@@ -899,6 +899,9 @@ pub fn all_files() -> Vec<(&'static str, Vec<u8>)> {
         ("size_zero", size_zero()),
         ("transforms", transforms()),
         ("essential_unknown", essential_unknown()),
+        ("mini_full", mini_file(&MiniSpec::full())),
+        ("mini_hevc", mini_file(&MiniSpec::hevc())),
+        ("mini_gain_map", mini_file(&MiniSpec::gain_map())),
     ];
     for f in ILOC_FORMATS {
         v.push(("iloc", iloc_file(f)));
@@ -1245,4 +1248,450 @@ pub fn all_movie_files() -> Vec<(&'static str, Vec<u8>)> {
         ("sync", movie_sync()),
         ("two_tracks", movie_two_tracks()),
     ]
+}
+
+// ---- the `mini` box ----
+
+/// Writes bits, most significant first; the last byte is padded with zero bits.
+#[derive(Default)]
+pub struct BitWriter {
+    bytes: Vec<u8>,
+    used: u32,
+}
+
+impl BitWriter {
+    pub fn flag(&mut self, on: bool) {
+        if self.used == 0 {
+            self.bytes.push(0);
+        }
+        let last = self.bytes.last_mut().unwrap();
+        if on {
+            *last |= 0x80u8 >> self.used;
+        }
+        self.used = (self.used + 1) % 8;
+    }
+
+    pub fn put(&mut self, value: u64, bits: u32) {
+        for i in (0..bits).rev() {
+            self.flag((value >> i) & 1 == 1);
+        }
+    }
+
+    pub fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+/// The gain map part of a [`MiniSpec`] (`gainmap_flag`).
+#[derive(Clone)]
+pub struct GainSpec {
+    pub same_dims: bool,
+    pub width: u32,
+    pub height: u32,
+    pub matrix: u8,
+    pub full_range: bool,
+    pub chroma: u8,
+    pub float: bool,
+    pub float_log2: u8,
+    pub depth: u8,
+    /// (primaries, transfer, matrix, full range) when `tmap_explicit_cicp_flag` is set.
+    pub tmap_cicp: Option<(u8, u8, u8, bool)>,
+    pub hdr: isobmff::MiniHdr,
+}
+
+impl GainSpec {
+    /// A 32 x 24 4:0:0 8 bit gain map of its own size.
+    pub fn small() -> Self {
+        Self {
+            same_dims: false,
+            width: 32,
+            height: 24,
+            matrix: 6,
+            full_range: true,
+            chroma: 0,
+            float: false,
+            float_log2: 0,
+            depth: 8,
+            tmap_cicp: None,
+            hdr: isobmff::MiniHdr::default(),
+        }
+    }
+}
+
+/// Everything a `mini` box says; [`mini_payload`] writes it. The `icc`, `exif` and `xmp` flags
+/// are set when their data is not empty, the large flags when a size needs them (or `large`).
+#[derive(Clone)]
+pub struct MiniSpec {
+    /// The `ftyp` minor version: `avif` or `heic`.
+    pub minor: [u8; 4],
+    pub version: u8,
+    /// `explicit_codec_types_flag`: (`infe_type`, `codec_config_type`).
+    pub codec: Option<([u8; 4], [u8; 4])>,
+    pub float: bool,
+    /// `bit_depth_log2_minus4` of a float image.
+    pub float_log2: u8,
+    /// 8, or 9..=16.
+    pub depth: u8,
+    pub full_range: bool,
+    pub alpha: bool,
+    pub premultiplied: bool,
+    pub cicp: Option<(u8, u8, u8)>,
+    /// `hdr_flag` (set anyway when there is a gain map).
+    pub hdr: bool,
+    pub hdr_main: isobmff::MiniHdr,
+    pub gain: Option<GainSpec>,
+    pub chroma: u8,
+    pub chroma_h: bool,
+    pub chroma_v: bool,
+    pub orientation: u8,
+    pub width: u32,
+    pub height: u32,
+    pub compressed: bool,
+    pub large: bool,
+    pub main_cfg: Vec<u8>,
+    pub alpha_cfg: Vec<u8>,
+    pub gain_cfg: Vec<u8>,
+    pub icc: Vec<u8>,
+    pub tmap_icc: Vec<u8>,
+    pub gain_meta: Vec<u8>,
+    pub alpha_data: Vec<u8>,
+    pub gain_data: Vec<u8>,
+    pub main_data: Vec<u8>,
+    pub exif: Vec<u8>,
+    pub xmp: Vec<u8>,
+    /// Bytes after the last chunk.
+    pub trailing: Vec<u8>,
+}
+
+impl MiniSpec {
+    /// AV1 (`ftyp` minor version `avif`), 64 x 48, 4:2:0, 8 bit, full range, orientation 1, the
+    /// [`av1c`] payload as configuration, no metadata.
+    pub fn av1() -> Self {
+        Self {
+            minor: *b"avif",
+            version: 0,
+            codec: None,
+            float: false,
+            float_log2: 0,
+            depth: 8,
+            full_range: true,
+            alpha: false,
+            premultiplied: false,
+            cicp: None,
+            hdr: false,
+            hdr_main: isobmff::MiniHdr::default(),
+            gain: None,
+            chroma: 1,
+            chroma_h: false,
+            chroma_v: false,
+            orientation: 1,
+            width: 64,
+            height: 48,
+            compressed: false,
+            large: false,
+            main_cfg: av1c()[8..].to_vec(),
+            alpha_cfg: Vec::new(),
+            gain_cfg: Vec::new(),
+            icc: Vec::new(),
+            tmap_icc: Vec::new(),
+            gain_meta: Vec::new(),
+            alpha_data: Vec::new(),
+            gain_data: Vec::new(),
+            main_data: b"MAIN-DATA-0123".to_vec(),
+            exif: Vec::new(),
+            xmp: Vec::new(),
+            trailing: Vec::new(),
+        }
+    }
+
+    /// HEVC (`ftyp` minor version `heic`) with the [`hvcc`] payload.
+    pub fn hevc() -> Self {
+        Self {
+            minor: *b"heic",
+            main_cfg: hvcc()[8..].to_vec(),
+            ..Self::av1()
+        }
+    }
+
+    /// Alpha (premultiplied), ICC, Exif and XMP, explicit CICP, 10 bit, orientation 6.
+    pub fn full() -> Self {
+        Self {
+            depth: 10,
+            alpha: true,
+            premultiplied: true,
+            cicp: Some((9, 16, 9)),
+            orientation: 6,
+            icc: b"ICC-PROFILE-BYTES".to_vec(),
+            alpha_data: b"ALPHA-DATA-4567".to_vec(),
+            exif: TIFF.to_vec(),
+            xmp: XMP.to_vec(),
+            ..Self::av1()
+        }
+    }
+
+    /// A gain map of its own size with the [`tmap_payload`] metadata and a `tmap` ICC profile.
+    pub fn gain_map() -> Self {
+        Self {
+            hdr_main: isobmff::MiniHdr {
+                clli: Some(isobmff::MiniClli {
+                    max_content_light_level: 1000,
+                    max_pic_average_light_level: 400,
+                }),
+                ..isobmff::MiniHdr::default()
+            },
+            gain: Some(GainSpec {
+                hdr: isobmff::MiniHdr {
+                    ndwt: Some(203),
+                    ..isobmff::MiniHdr::default()
+                },
+                ..GainSpec::small()
+            }),
+            tmap_icc: b"TMAP-ICC".to_vec(),
+            gain_meta: tmap_payload()[1..].to_vec(),
+            gain_data: b"GAIN-DATA-89".to_vec(),
+            ..Self::av1()
+        }
+    }
+}
+
+fn put_centred(w: &mut BitWriter, chroma: u8, h: bool, v: bool) {
+    if chroma == 1 || chroma == 2 {
+        w.flag(h);
+    }
+    if chroma == 1 {
+        w.flag(v);
+    }
+}
+
+fn put_depth(w: &mut BitWriter, float: bool, log2: u8, depth: u8) {
+    if float {
+        w.put(u64::from(log2), 2);
+    } else if depth > 8 {
+        w.flag(true);
+        w.put(u64::from(depth - 9), 3);
+    } else {
+        w.flag(false);
+    }
+}
+
+fn put_hdr(w: &mut BitWriter, h: &isobmff::MiniHdr) {
+    w.flag(h.clli.is_some());
+    w.flag(h.mdcv.is_some());
+    w.flag(h.cclv.is_some());
+    w.flag(h.amve.is_some());
+    w.flag(h.reve.is_some());
+    w.flag(h.ndwt.is_some());
+    if let Some(c) = h.clli {
+        w.put(u64::from(c.max_content_light_level), 16);
+        w.put(u64::from(c.max_pic_average_light_level), 16);
+    }
+    if let Some(m) = h.mdcv {
+        for (x, y) in m.primaries {
+            w.put(u64::from(x), 16);
+            w.put(u64::from(y), 16);
+        }
+        w.put(u64::from(m.white_point.0), 16);
+        w.put(u64::from(m.white_point.1), 16);
+        w.put(u64::from(m.max_luminance), 32);
+        w.put(u64::from(m.min_luminance), 32);
+    }
+    if let Some(c) = h.cclv {
+        w.put(0, 2);
+        w.flag(c.primaries.is_some());
+        w.flag(c.min_luminance.is_some());
+        w.flag(c.max_luminance.is_some());
+        w.flag(c.avg_luminance.is_some());
+        w.put(0, 2);
+        for (x, y) in c.primaries.into_iter().flatten() {
+            w.put(u64::from(x as u32), 32);
+            w.put(u64::from(y as u32), 32);
+        }
+        for v in [c.min_luminance, c.max_luminance, c.avg_luminance]
+            .into_iter()
+            .flatten()
+        {
+            w.put(u64::from(v), 32);
+        }
+    }
+    if let Some(a) = h.amve {
+        w.put(u64::from(a.ambient_illumination), 32);
+        w.put(u64::from(a.ambient_light_x), 16);
+        w.put(u64::from(a.ambient_light_y), 16);
+    }
+    if let Some(r) = h.reve {
+        for (a, x, y) in r.values {
+            w.put(u64::from(a), 32);
+            w.put(u64::from(x), 16);
+            w.put(u64::from(y), 16);
+        }
+    }
+    if let Some(n) = h.ndwt {
+        w.put(u64::from(n), 32);
+    }
+}
+
+/// The payload of a `mini` box (the bytes after its header).
+pub fn mini_payload(m: &MiniSpec) -> Vec<u8> {
+    let gain = m.gain.as_ref();
+    let hdr = m.hdr || gain.is_some();
+    let (icc, exif, xmp) = (!m.icc.is_empty(), !m.exif.is_empty(), !m.xmp.is_empty());
+    let gain_data = if gain.is_some() { m.gain_data.len() } else { 0 };
+    let tmap_icc = if gain.is_some() { m.tmap_icc.len() } else { 0 };
+    let gain_meta = if gain.is_some() { m.gain_meta.len() } else { 0 };
+    let alpha_data = if m.alpha { m.alpha_data.len() } else { 0 };
+    let large_dim = m.large
+        || m.width.max(m.height) > 128
+        || gain.is_some_and(|g| !g.same_dims && g.width.max(g.height) > 128);
+    let large_meta = m.large
+        || [m.icc.len(), tmap_icc, m.exif.len(), m.xmp.len()]
+            .iter()
+            .any(|&n| n > 1024)
+        || gain_meta > 1023;
+    let large_cfg = m.large
+        || [m.main_cfg.len(), m.alpha_cfg.len(), m.gain_cfg.len()]
+            .iter()
+            .any(|&n| n > 7);
+    let large_data =
+        m.large || m.main_data.len() > 32768 || alpha_data > 32767 || gain_data > 32767;
+
+    let mut w = BitWriter::default();
+    w.put(u64::from(m.version), 2);
+    w.flag(m.codec.is_some());
+    w.flag(m.float);
+    w.flag(m.full_range);
+    w.flag(m.alpha);
+    w.flag(m.cicp.is_some());
+    w.flag(hdr);
+    w.flag(icc);
+    w.flag(exif);
+    w.flag(xmp);
+    w.put(u64::from(m.chroma), 2);
+    w.put(u64::from(m.orientation - 1), 3);
+    w.flag(large_dim);
+    let dn = if large_dim { 15 } else { 7 };
+    w.put(u64::from(m.width - 1), dn);
+    w.put(u64::from(m.height - 1), dn);
+    put_centred(&mut w, m.chroma, m.chroma_h, m.chroma_v);
+    put_depth(&mut w, m.float, m.float_log2, m.depth);
+    if m.alpha {
+        w.flag(m.premultiplied);
+    }
+    if let Some((p, t, mc)) = m.cicp {
+        for v in [p, t, mc] {
+            w.put(u64::from(v), 8);
+        }
+    }
+    if let Some((infe, cfg)) = m.codec {
+        w.put(u64::from(u32::from_be_bytes(infe)), 32);
+        w.put(u64::from(u32::from_be_bytes(cfg)), 32);
+    }
+    if hdr {
+        w.flag(gain.is_some());
+        if let Some(g) = gain {
+            w.flag(g.same_dims);
+            if !g.same_dims {
+                w.put(u64::from(g.width - 1), dn);
+                w.put(u64::from(g.height - 1), dn);
+            }
+            w.put(u64::from(g.matrix), 8);
+            w.flag(g.full_range);
+            w.put(u64::from(g.chroma), 2);
+            put_centred(&mut w, g.chroma, false, false);
+            w.flag(g.float);
+            put_depth(&mut w, g.float, g.float_log2, g.depth);
+            w.flag(tmap_icc > 0);
+            w.flag(g.tmap_cicp.is_some());
+            if let Some((p, t, mc, full)) = g.tmap_cicp {
+                for v in [p, t, mc] {
+                    w.put(u64::from(v), 8);
+                }
+                w.flag(full);
+            }
+        }
+        put_hdr(&mut w, &m.hdr_main);
+        if let Some(g) = gain {
+            put_hdr(&mut w, &g.hdr);
+        }
+    }
+    if icc || exif || xmp || gain.is_some() {
+        w.flag(large_meta);
+    }
+    w.flag(large_cfg);
+    w.flag(large_data);
+    let (mb, cb, db) = (
+        if large_meta { 20 } else { 10 },
+        if large_cfg { 12 } else { 3 },
+        if large_data { 28 } else { 15 },
+    );
+    if icc {
+        w.put(m.icc.len() as u64 - 1, mb);
+    }
+    if tmap_icc > 0 {
+        w.put(tmap_icc as u64 - 1, mb);
+    }
+    if gain.is_some() {
+        w.put(gain_meta as u64, mb);
+        w.put(gain_data as u64, db);
+        if gain_data > 0 {
+            w.put(m.gain_cfg.len() as u64, cb);
+        }
+    }
+    w.put(m.main_cfg.len() as u64, cb);
+    w.put(m.main_data.len() as u64 - 1, db);
+    if m.alpha {
+        w.put(alpha_data as u64, db);
+        if alpha_data > 0 {
+            w.put(m.alpha_cfg.len() as u64, cb);
+        }
+    }
+    if exif || xmp {
+        w.flag(m.compressed);
+    }
+    if exif {
+        w.put(m.exif.len() as u64 - 1, mb);
+    }
+    if xmp {
+        w.put(m.xmp.len() as u64 - 1, mb);
+    }
+    let mut out = w.finish();
+    out.extend_from_slice(&m.main_cfg);
+    if alpha_data > 0 {
+        out.extend_from_slice(&m.alpha_cfg);
+    }
+    if gain_data > 0 {
+        out.extend_from_slice(&m.gain_cfg);
+    }
+    out.extend_from_slice(&m.icc);
+    if gain.is_some() {
+        out.extend_from_slice(&m.tmap_icc);
+        out.extend_from_slice(&m.gain_meta);
+    }
+    if m.alpha {
+        out.extend_from_slice(&m.alpha_data);
+    }
+    if gain.is_some() {
+        out.extend_from_slice(&m.gain_data);
+    }
+    out.extend_from_slice(&m.main_data);
+    out.extend_from_slice(&m.exif);
+    out.extend_from_slice(&m.xmp);
+    out.extend_from_slice(&m.trailing);
+    out
+}
+
+/// `ftyp` (major `mif3`, the minor version of `m`, no compatible brands) and the `mini` box.
+pub fn mini_file(m: &MiniSpec) -> Vec<u8> {
+    mini_file_of(m.minor, &bx(b"mini", &mini_payload(m)))
+}
+
+/// `ftyp` (major `mif3`) with the given minor version, then `rest`.
+pub fn mini_file_of(minor: [u8; 4], rest: &[u8]) -> Vec<u8> {
+    cat(&[&bx(b"ftyp", &cat(&[b"mif3", &minor])), rest])
+}
+
+/// The position of the first `needle` in `file`.
+pub fn find(file: &[u8], needle: &[u8]) -> u64 {
+    file.windows(needle.len())
+        .position(|w| w == needle)
+        .unwrap() as u64
 }

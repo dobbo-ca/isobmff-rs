@@ -12,6 +12,7 @@ use crate::error::ItemError;
 use crate::ftyp::Ftyp;
 use crate::meta::{Association, EntityGroup, Meta, Reference, iloc};
 use crate::metadata::{Metadata, exif_tiff};
+use crate::mini::Mini;
 use crate::props::{Av1c, Axis, Clap, Colour, Hvcc, PropValue, Property};
 use crate::{Error, Extent, FourCc, Limit, Limits};
 
@@ -128,6 +129,9 @@ pub struct Heif {
     /// Every child of `iprp` that is not `ipco` or `ipma` (unknown boxes) as (type, whole-box range),
     /// in file order. Kept, not parsed.
     pub iprp_other: Vec<(FourCc, Extent)>,
+    /// The top-level `mini` box (ISO/IEC 23008-12 Annex O) when the file has one instead of `meta`:
+    /// its header fields and chunk ranges. The items and properties above are made from it.
+    pub mini: Option<Mini>,
     /// The file has a top-level `moov` box (not parsed in this version).
     pub has_moov: bool,
     /// Box counts of the parse.
@@ -350,12 +354,15 @@ fn soft(e: &Error) -> bool {
 }
 
 /// Reads and parses the payload of a `grid`, `iovl` or `tmap` item. `None` for other types.
+/// `mini`: the file has a `mini` box, whose `tmap` item data lacks the leading version byte (0)
+/// of the payload.
 fn derive<F: Fetch>(
     ctx: &Ctx<'_>,
     fetch: &mut F,
     kind: FourCc,
     data: &Result<Vec<Extent>, ItemError>,
     spent: &mut usize,
+    mini: bool,
 ) -> Result<Option<Result<Derived, Error>>, Error> {
     let what = match &kind.0 {
         b"grid" => "grid",
@@ -379,7 +386,12 @@ fn derive<F: Fetch>(
     if *spent > DERIVED_TOTAL_MAX {
         return Ok(Some(Err(Error::Malformed(what))));
     }
-    let mut buf = ctx.budget.vec::<u8>(total)?;
+    let prefix = usize::from(mini && what == "tmap");
+    let held = total.saturating_add(prefix);
+    let mut buf = ctx.budget.vec::<u8>(held)?;
+    if prefix == 1 {
+        buf.push(0);
+    }
     for e in extents {
         fetch.fetch(*e, &mut buf)?;
     }
@@ -388,7 +400,7 @@ fn derive<F: Fetch>(
         "iovl" => parse_iovl(&buf, ctx.limits, ctx.budget).map(Derived::Overlay),
         _ => parse_tmap(&buf).map(Derived::Tmap),
     };
-    ctx.budget.release(total);
+    ctx.budget.release(held);
     match parsed {
         Ok(d) => Ok(Some(Ok(d))),
         Err(e) if soft(&e) => Ok(Some(Err(e))),
@@ -402,6 +414,7 @@ pub(crate) fn build<F: Fetch>(
     ftyp: Ftyp,
     has_moov: bool,
     meta: Meta,
+    mini: Option<Mini>,
     fetch: &mut F,
 ) -> Result<Heif, Error> {
     let budget = ctx.budget;
@@ -463,7 +476,14 @@ pub(crate) fn build<F: Fetch>(
                 .unwrap_or_default(),
             Err(_) => Vec::new(),
         };
-        let derived = derive(ctx, fetch, info.item_type, &data, &mut derived_spent)?;
+        let derived = derive(
+            ctx,
+            fetch,
+            info.item_type,
+            &data,
+            &mut derived_spent,
+            mini.is_some(),
+        )?;
         items.push(Item {
             id: info.id,
             item_type: info.item_type,
@@ -516,6 +536,7 @@ pub(crate) fn build<F: Fetch>(
         groups,
         other_boxes: other,
         iprp_other,
+        mini,
         has_moov,
         stats: Stats {
             boxes: ctx.boxes.get(),
@@ -1020,7 +1041,8 @@ impl Heif {
     /// The Exif and XMP bytes of image `image` (the first `cdsc` item of each kind). The Exif
     /// item payload is a big-endian `exif_tiff_header_offset`, that many bytes, then the TIFF
     /// header: the result starts at the TIFF header (what `exif::Exif::parse` takes). The XMP
-    /// packet is the item bytes as they are. Borrowed from `data` for a one-extent item.
+    /// packet is the item bytes as they are. Borrowed from `data` for a one-extent item. The Exif
+    /// item of a `mini` box has no offset field: its bytes are the TIFF data as they are.
     ///
     /// # Errors
     ///
@@ -1040,7 +1062,15 @@ impl Heif {
         self.item(image).ok_or(Error::NoSuchItem(image))?;
         let (exif_ids, xmp_ids) = self.linked_metadata(image);
         let exif = match exif_ids.first() {
-            Some(&id) => Some(exif_tiff(self.metadata_item(data, id, limits, &budget)?)?),
+            Some(&id) => {
+                let item = self.metadata_item(data, id, limits, &budget)?;
+                // The `mini` box has no `exif_tiff_header_offset` (libavif skips it too).
+                Some(if self.mini.is_some() {
+                    item
+                } else {
+                    exif_tiff(item)?
+                })
+            }
             None => None,
         };
         let xmp = match xmp_ids.first() {

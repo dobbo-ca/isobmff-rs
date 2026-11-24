@@ -15,7 +15,10 @@ Third-party code and data
    positive denominators below 2^31, integer clap width and height, integer and non-negative left
    and top edges, a rectangle inside the image). The gain map payload checks of
    src/derived.rs (non-zero denominators, max not below min, non-zero gamma, no trailing bytes
-   for writer version 0) follow src/gainmap.c and the tmap reader in src/read.c.
+   for writer version 0) follow src/gainmap.c and the tmap reader in src/read.c. The gain map items
+   of the `mini` box in src/mini.rs (item 3 `tmap` with `dimg` [1, 4] and an `altr` group [3, 1],
+   item 4, the ispe of the `tmap` item swapped for orientations 5 to 8, the tmap payload as the
+   byte 0 followed by the metadata chunk) follow avifParseMiniBox in src/read.c; no code is copied.
    libavif also runs as a CI oracle (tests/parity/c/avif_oracle.c); it is not linked into the
    crate.
 
@@ -47,7 +50,9 @@ Third-party code and data
 2. libheif 1.23.7 (LGPL-3.0), github.com/strukturag/libheif at 12a259a.
 
    Used only as a CI oracle (built from source, tests/parity/c/heif_oracle.c) and as a design
-   reference for which structures to read. No libheif code is copied or linked, and libheif is
+   reference for which structures to read (the bit syntax and item layout of the `mini` box in
+   src/mini.rs follow mini.cc, written from the layout, not copied). No libheif code is copied or
+   linked, and libheif is
    not a dependency of the crate or part of anything it ships.
 
 3. libultrahdr (MIT or Apache-2.0): the common-denominator layout of the ISO 21496-1 payload

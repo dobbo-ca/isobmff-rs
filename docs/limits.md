@@ -17,7 +17,7 @@ before they happen (`Budget::vec`).
 | `max_extents` | 1 000 000 | iloc extents, all items together; also the work of resolving construction method 2 | max_iloc_extents_per_item 32 |
 | `max_grid_tiles` | 65 536 | rows x columns of a grid; inputs of an iovl | max_number_of_tiles 4096 x 4096 |
 | `max_pixels` | 1 << 30 | ispe, grid and iovl width x height | max_image_size_pixels 32768 x 32768 |
-| `max_meta_bytes` | 64 MiB | size of the `meta` box (and of the `ftyp` payload) that `read` copies; `parse` has no such cap | - |
+| `max_meta_bytes` | 64 MiB | size of the `meta` or `mini` box (and of the `ftyp` payload) that `read` copies; `parse` has no such cap | - |
 | `max_metadata_bytes` | 64 MiB | one Exif or XMP item returned by `metadata()` | max_memory_block_size 4 GiB |
 | `max_moov_bytes` | 64 MiB | size of the `moov` box (and `ftyp` payload) that `read_movie` copies; `parse_movie` has no such cap | - |
 

@@ -88,7 +88,7 @@ pub enum PropValue {
     Hvcc(Arc<Hvcc>),
     /// `av1C`.
     Av1c(Av1c),
-    /// A property this crate knows by name and ignores (`clli`, `mdcv`, `cclv`, `amve`,
+    /// A property this crate knows by name and ignores (`clli`, `mdcv`, `cclv`, `amve`, `ndwt`,
     /// `altt`, or a `colr` of another colour type).
     Other,
     /// `rref`: the reference types the item requires its reader to understand.
@@ -129,7 +129,7 @@ pub(crate) fn parse_value(
             .and_then(|()| parse_hvcc(bytes, base, budget))
             .map(|h| PropValue::Hvcc(Arc::new(h))),
         b"av1C" => parse_av1c(bytes, base).map(PropValue::Av1c),
-        b"clli" | b"mdcv" | b"cclv" | b"amve" | b"altt" => Ok(PropValue::Other),
+        b"clli" | b"mdcv" | b"cclv" | b"amve" | b"ndwt" | b"altt" => Ok(PropValue::Other),
         _ => Ok(PropValue::Unknown),
     };
     match r {

@@ -2,7 +2,7 @@
 
 Public HEIF/AVIF and MP4/MOV samples at pinned commits, listed in `tests/parity/corpus.toml`. Nothing of it is
 stored in this repo: `tests/parity/fetch.sh` makes a blobless sparse checkout per source into the
-BuildKit cache mount `isobmff-rs-data`. About 630 HEIF and AVIF files; gate 4 fails below `PARITY_MIN_INPUTS`
+BuildKit cache mount `isobmff-rs-data`. About 634 HEIF and AVIF files; gate 4 fails below `PARITY_MIN_INPUTS`
 (600). The MP4/MOV sources (named `mp4-*`, about 200 files, see below) are read by gate 5 only: it also reads
 every file above that has a `moov` (the animated AVIF files). `PARITY_MIN_MP4` (100) is a guess: set it from
 the first green run. Research of 2026-11-19 used the GitHub API only; the feature tags below come from each
@@ -17,9 +17,9 @@ source's own docs and file names, not from inspecting the files, so check them w
 | link-u/avif-sample-images | `c666a368` | 156 | `README.md:9`: "Most images are licensed under CC-BY-SA 4.0"; red-at-12-oclock: "GNU LGPL v2.1 or 2 claused BSD License" | alpha, ICC, avis, clap/irot/imir |
 | AOMediaCodec/av1-avif | `bf4c18d1` | 17 | Apple `license.txt`: "CC-BY-SA-4.0"; Xiph `COPYING`: CC BY-SA 3.0 and CC BY 3.0; Microsoft `ReadMe.md`: bbb "Creative Commons Attribution 3.0" | multilayer a1lx/a1op/lsel, grids, alpha |
 | MPEGGroup/FileFormatConformance | `767a5bcb` | 61 (LFS) | `LICENSE:1-3`: "The Clear BSD License / Copyright (c) 2023, Apple Inc." | HEIF conformance: grid, iovl, alpha, thumbnails, Exif, clap/irot/imir, sequences |
-| nokiatech/heif (gh-pages) | `f01283f3` | 19 | `CONTENT-LICENSES.md` section 7: "Freely redistributable for conformance testing and demonstration." | conformance files not in the MPEG repo (C043..C053, C71, MIAF) |
+| nokiatech/heif (gh-pages) | `f01283f3` | 22 | `CONTENT-LICENSES.md:148-160`, section 7: "Freely redistributable for conformance testing and demonstration." (C71.heic, C75.hmg, C83.hmg, 1dualMiniVVC.hmg are listed by name) | conformance files not in the MPEG repo (C043..C053, C71, MIAF); `mini` box files: C71 (HEVC, orientation 8), C75, C83 and 1dualMiniVVC (VVC `.hmg`: libheif and isobmff-rs reject them, no codec types) |
 | mozilla/mp4parse-rust | `d3a9abfc` | 69 | no data statement; repo MPL-2.0 | small valid and corrupt AVIF: colr kinds, ipma, essential flags, odd box sizes |
-| imazen/heic `testdata/apple-hdr` | `4d72cadd` | 1 | `testdata/README.md`: "Licensed under the MIT License" | Apple `hdrgainmap` aux image and its XMP |
+| imazen/heic `testdata/apple-hdr`, `testdata/libheif-examples/lightning_mini.heif` | `4d72cadd` | 2 | `testdata/README.md`: apple-hdr "Licensed under the MIT License"; `testdata/README.md:7-10`: libheif-examples "Licensed under the MIT License (see `libheif-examples/COPYING`)" | Apple `hdrgainmap` aux image and its XMP; the pre-final draft syntax of the `mini` box (byte-identical to libheif 0733824f `tests/data/lightning_mini.heif`, replaced there on 2026-04-12); isobmff-rs parses it (hvcC Invalid) |
 | aaron-rust/hdr-sample-images | `df0d5df4` | 4 (LFS) | `README.md:31`: "All image files in this repository are licensed under the Creative Commons Zero (CC0) license" | large HEVC/AV1 images, grids, HDR |
 
 ## MP4/MOV sources (gate 5)
@@ -44,8 +44,11 @@ source to `git lfs pull`, so an excluded file is not downloaded.
 
 ## Gaps
 
-- No source with a clear licence has: a tmap gain map in HEIC, `iloc` v2, `largesize`, or an iPhone
-  depth map.
+- No source with a clear licence has: a tmap gain map in HEIC, `iloc` v2, `largesize`, an iPhone
+  depth map, or a `mini` box with a gain map (libavif builds those in memory only, in
+  `avifminitest`).
+- The 11 public `mini` box files are 4:2:0, 4:4:4 or alpha images; none sets `hdr`. `C83_dup.hmg`
+  is the same blob as `C83.hmg` and is left out.
 
 ## Excluded
 

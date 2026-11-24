@@ -1,6 +1,6 @@
 # isobmff-rs
 
-Parses ISO-BMFF containers: HEIF (HEIC), AVIF and the tracks of MP4/MOV/3GP/AVIS files. It decodes no pixels. It
+Parses ISO-BMFF containers: HEIF (HEIC), AVIF (including the low-overhead `mini` box) and the tracks of MP4/MOV/3GP/AVIS files. It decodes no pixels. It
 gives the item graph of a file: primary image, tiles, alpha, depth, thumbnails, gain map and
 Exif/XMP, where every coded item is a codec configuration record plus byte ranges of the file.
 hevc-rs and av1-rs decode those bytes; exif-rs parses the Exif and XMP bytes. Pure Rust, no
@@ -67,7 +67,7 @@ Details and rationale: [docs/limits.md](docs/limits.md).
 | `max_extents` | 1 000 000 | iloc extents, all items; work of construction method 2 | `Extents` |
 | `max_grid_tiles` | 65 536 | tiles of a grid, inputs of an iovl | `GridTiles` |
 | `max_pixels` | 1 << 30 | width x height | `Pixels` |
-| `max_meta_bytes` | 64 MiB | bytes of `meta` copied by `read` | `MetaBytes` |
+| `max_meta_bytes` | 64 MiB | bytes of `meta` (or `mini`) copied by `read` | `MetaBytes` |
 | `max_metadata_bytes` | 64 MiB | bytes of one Exif or XMP item | `MetadataBytes` |
 | `max_moov_bytes` | 64 MiB | bytes of `moov` copied by `read_movie` | `MoovBytes` |
 

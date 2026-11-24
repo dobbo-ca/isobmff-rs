@@ -107,6 +107,7 @@ mod graph;
 mod limits;
 mod meta;
 mod metadata;
+mod mini;
 mod movie;
 mod props;
 
@@ -122,6 +123,7 @@ pub use graph::{
 pub use limits::Limits;
 pub use meta::{Association, EntityGroup, Reference};
 pub use metadata::Metadata;
+pub use mini::{Mini, MiniAmve, MiniCclv, MiniClli, MiniGainMap, MiniHdr, MiniMdcv, MiniReve};
 pub use movie::{Edit, Movie, Sample, SampleEntry, Samples, Track, parse_movie, read_movie};
 pub use props::{Av1c, Axis, Clap, Colour, Hvcc, NalArray, PropValue, Property, Rect};
 
@@ -129,7 +131,8 @@ use boxes::{BoxHeader, Boxes, Ctx, Src, decode_header};
 use budget::Budget;
 use graph::Fetch;
 
-/// Parses the structure of a HEIF, HEIC or AVIF file held in memory: `ftyp`, `meta` with its
+/// Parses the structure of a HEIF, HEIC or AVIF file held in memory: `ftyp`, `meta` (or the `mini`
+/// box that replaces it, see [`Heif::mini`]) with its
 /// items, properties, references and groups, and the small payloads of `grid`, `iovl` and `tmap`
 /// items. The item data itself is not read; [`Heif::item_bytes`] gives it from the same `data`.
 ///
@@ -144,9 +147,12 @@ use graph::Fetch;
 /// [`Error::Truncated`] when a top-level box before `meta` and `moov` runs past the end of `data` (after
 /// `meta` or `moov`, an incomplete or overlong box ends the walk and item data fails per item);
 /// [`Error::Malformed`] for an invalid box (a size smaller than its header or past its parent,
-/// two `meta` boxes, a `meta` that is not version 0 or whose first child is not an `hdlr` of
+/// two `meta` boxes, two `mini` boxes or a `mini` with a `meta`, a `meta` that is not version 0 or
+/// whose first child is not an `hdlr` of
 /// handler `pict`, a box that is too short for its fields, an item id that appears twice in
-/// `iinf`, `iloc` or `ipma`, ...); [`Error::LimitExceeded`] for any [`Limits`] field;
+/// `iinf`, `iloc` or `ipma`, a `mini` whose chunks run past its payload, ...);
+/// [`Error::Unsupported`] for a `mini` of a version other than 0, or without explicit codec types and with an `ftyp` minor version other than `avif` or `heic`;
+/// [`Error::LimitExceeded`] for any [`Limits`] field;
 /// [`Error::OutOfMemory`]; [`Error::Cancelled`].
 pub fn parse(data: &[u8], limits: &Limits, cancel: &AtomicBool) -> Result<Heif, Error> {
     let budget = Budget::new(limits, cancel);
@@ -166,7 +172,7 @@ pub fn parse(data: &[u8], limits: &Limits, cancel: &AtomicBool) -> Result<Heif, 
         let h = match boxes.next_box() {
             Ok(Some(h)) => h,
             Ok(None) => break,
-            // After `meta`, a damaged tail ends the walk (as in libheif).
+            // After `meta` or `mini`, a damaged tail ends the walk (as in libheif).
             Err(Error::Truncated) if top.meta.is_some() || top.has_moov => break,
             Err(e) => return Err(e),
         };
@@ -175,20 +181,28 @@ pub fn parse(data: &[u8], limits: &Limits, cancel: &AtomicBool) -> Result<Heif, 
             top.ftyp = Some(ftyp::parse(ctx.slice(h.payload())?, &budget)?);
         }
     }
-    let (ftyp, hdr, has_moov) = top.finish()?;
-    let meta = match &hdr {
-        Some(hdr) => meta::parse(&ctx, hdr)?,
-        None => meta::Meta::default(),
+    let (ftyp, hdr, is_mini, has_moov) = top.finish()?;
+    let (meta, mini) = match &hdr {
+        Some(hdr) if is_mini => {
+            let (m, mini) = mini::parse(&ctx, hdr, &ftyp)?;
+            (m, Some(mini))
+        }
+        Some(hdr) => (meta::parse(&ctx, hdr)?, None),
+        None => (meta::Meta::default(), None),
     };
-    graph::build(&ctx, ftyp, has_moov, meta, &mut SliceFetch(data))
+    graph::build(&ctx, ftyp, has_moov, meta, mini, &mut SliceFetch(data))
 }
 
 /// What the top-level walk finds.
 #[derive(Default)]
 struct Top {
     ftyp: Option<Ftyp>,
+    /// The first `meta` or `mini` box (a file has one of them, see `finish`).
     meta: Option<BoxHeader>,
     metas: usize,
+    /// The box in `meta` is a `mini`.
+    mini: bool,
+    minis: usize,
     has_moov: bool,
 }
 
@@ -197,24 +211,36 @@ impl Top {
         match &h.kind.0 {
             b"meta" => {
                 self.metas = self.metas.saturating_add(1);
-                self.meta.get_or_insert(*h);
+                if self.meta.is_none() {
+                    self.meta = Some(*h);
+                }
+            }
+            b"mini" => {
+                self.minis = self.minis.saturating_add(1);
+                if self.meta.is_none() {
+                    self.meta = Some(*h);
+                    self.mini = true;
+                }
             }
             b"moov" => self.has_moov = true,
             _ => {}
         }
     }
 
-    /// `None` for the `meta` header when the file has a `moov` but no `meta` (an image sequence:
-    /// an empty item graph).
-    fn finish(self) -> Result<(Ftyp, Option<BoxHeader>, bool), Error> {
+    /// `None` for the `meta` (or `mini`) header when the file has a `moov` but neither (an image
+    /// sequence: an empty item graph); then the flag says whether the header is a `mini`.
+    fn finish(self) -> Result<(Ftyp, Option<BoxHeader>, bool, bool), Error> {
         let ftyp = self.ftyp.ok_or(Error::UnknownFormat)?;
         if self.metas > 1 {
             return Err(Error::Malformed("meta"));
         }
+        if self.minis > 1 || (self.minis > 0 && self.metas > 0) {
+            return Err(Error::Malformed("mini"));
+        }
         if self.meta.is_none() && !self.has_moov {
             return Err(Error::NoMeta);
         }
-        Ok((ftyp, self.meta, self.has_moov))
+        Ok((ftyp, self.meta, self.mini, self.has_moov))
     }
 }
 
@@ -277,7 +303,7 @@ impl<R: Read + Seek> Fetch for ReadFetch<'_, R> {
 ///
 /// # Errors
 ///
-/// Those of [`parse`], and [`Error::LimitExceeded`] with `Limit::MetaBytes` for a larger `meta`;
+/// Those of [`parse`], and [`Error::LimitExceeded`] with `Limit::MetaBytes` for a larger `meta` or `mini`;
 /// [`Error::Truncated`] when the reader ends early; [`Error::Io`] for another I/O error.
 pub fn read<R: Read + Seek>(mut r: R, limits: &Limits, cancel: &AtomicBool) -> Result<Heif, Error> {
     let budget = Budget::new(limits, cancel);
@@ -319,13 +345,14 @@ pub fn read<R: Read + Seek>(mut r: R, limits: &Limits, cancel: &AtomicBool) -> R
         }
         pos = h.end;
     }
-    let (ftyp, hdr, has_moov) = top.finish()?;
+    let (ftyp, hdr, is_mini, has_moov) = top.finish()?;
     let Some(hdr) = hdr else {
         return graph::build(
             &walk,
             ftyp,
             has_moov,
             meta::Meta::default(),
+            None,
             &mut ReadFetch(&mut r),
         );
     };
@@ -342,8 +369,13 @@ pub fn read<R: Read + Seek>(mut r: R, limits: &Limits, cancel: &AtomicBool) -> R
     };
     let ctx = Ctx::new(&src, &budget, limits);
     ctx.boxes.set(walk.boxes.get());
-    let meta = meta::parse(&ctx, &hdr)?;
-    graph::build(&ctx, ftyp, has_moov, meta, &mut ReadFetch(&mut r))
+    let (meta, mini) = if is_mini {
+        let (m, mini) = mini::parse(&ctx, &hdr, &ftyp)?;
+        (m, Some(mini))
+    } else {
+        (meta::parse(&ctx, &hdr)?, None)
+    };
+    graph::build(&ctx, ftyp, has_moov, meta, mini, &mut ReadFetch(&mut r))
 }
 
 /// Entry points for the fuzz targets: one per parser, on a raw box payload (the bytes after the
@@ -501,6 +533,49 @@ pub mod __fuzz {
     /// `Malformed`.
     pub fn tmap(data: &[u8], _limits: &Limits) -> Result<(), Error> {
         derived::parse_tmap(data).map(|_| ())
+    }
+
+    /// The `mini` parser on the payload `data` (the `ftyp` minor version is `avif` for an even
+    /// length and `heic` for an odd one), then the item graph built from it and every item
+    /// looked at.
+    ///
+    /// # Errors
+    ///
+    /// `Malformed`, `Unsupported`, limit errors.
+    pub fn mini(data: &[u8], limits: &Limits) -> Result<(), Error> {
+        let cancel = AtomicBool::new(false);
+        let budget = Budget::new(limits, &cancel);
+        let src = Src {
+            bytes: data,
+            base: 0,
+            file_len: len(data),
+        };
+        let ctx = Ctx::new(&src, &budget, limits);
+        let hdr = BoxHeader {
+            kind: FourCc(*b"mini"),
+            uuid: None,
+            start: 0,
+            header_len: 0,
+            end: len(data),
+        };
+        let brand = if data.len() & 1 == 0 {
+            *b"avif"
+        } else {
+            *b"heic"
+        };
+        let ftyp = Ftyp {
+            major: FourCc(*b"mif3"),
+            minor_version: u32::from_be_bytes(brand),
+            compatible: Vec::new(),
+        };
+        let (m, mi) = super::mini::parse(&ctx, &hdr, &ftyp)?;
+        let h = graph::build(&ctx, ftyp, false, m, Some(mi), &mut SliceFetch(data))?;
+        for it in &h.items {
+            let _ = h.image(it.id);
+            let _ = h.item_bytes(data, it.id, limits, &cancel);
+        }
+        let _ = h.metadata(data, h.primary, limits, &cancel);
+        Ok(())
     }
 
     /// The `ftyp` parser.
