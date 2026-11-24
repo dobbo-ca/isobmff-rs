@@ -618,13 +618,18 @@ static int dump_graph(const char *name, heif_context *ctx, const uint8_t *data, 
         uint32_t id = item_ids[i];
         int np = heif_item_get_properties_of_type(ctx, id, heif_item_property_type_invalid, NULL, 0);
         heif_property_id *pids;
+        int shown = 0;
         if (np <= 0 || !(pids = (heif_property_id *)calloc((size_t)np, sizeof *pids))) {
             continue;
         }
         np = heif_item_get_properties_of_type(ctx, id, heif_item_property_type_invalid, pids, np);
         for (k = 0; k < np; k++) {
             uint32_t pt = (uint32_t)heif_item_get_property_type(ctx, id, pids[k]);
-            fprintf(f, "prop %u %u ", id, pids[k]);
+            if (pt == heif_fourcc('f', 'r', 'e', 'e')) {
+                continue; /* the placeholders of a mini box: not listed, not counted */
+            }
+            shown++;
+            fprintf(f, "prop %u %d ", id, shown);
             fcc(f, pt);
             if (pt == heif_fourcc('i', 'r', 'o', 't')) {
                 fprintf(f, " rot=%d", heif_item_get_property_transform_rotation_ccw(ctx, id, pids[k]));

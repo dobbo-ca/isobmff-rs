@@ -458,14 +458,21 @@ fn graph(name: &str, h: &Heif, src: &mut Src<'_>, lim: &Limits, dir: &Path) -> S
         {
             continue;
         }
-        for (k, a) in it.associations.iter().enumerate() {
+        // `free` boxes are not listed and not counted: libheif makes them as the placeholders of a
+        // `mini` box (docs/parity.md).
+        let mut shown = 0usize;
+        for a in &it.associations {
             let Some(p) = usize::from(a.index)
                 .checked_sub(1)
                 .and_then(|i| h.properties.get(i))
             else {
                 continue;
             };
-            let _ = write!(o, "prop {} {} ", it.id, k + 1);
+            if p.kind.0 == *b"free" {
+                continue;
+            }
+            shown += 1;
+            let _ = write!(o, "prop {} {shown} ", it.id);
             // libheif lists a property that failed to parse as type `ERR `.
             if matches!(p.value, PropValue::Invalid) {
                 o.push_str("ERR%20");
@@ -558,7 +565,8 @@ fn be32(d: &[u8], o: usize) -> Option<u32> {
     ))
 }
 
-/// The `avif_oracle.c` rule: the first box is an `ftyp` with `avif` as major or compatible brand.
+/// The `avif_oracle.c` rule: the first box is an `ftyp` with `avif` or `mif3` (the brand of a `mini`
+/// box file) as major or compatible brand.
 fn has_avif_brand(d: &[u8]) -> bool {
     fn brand(d: &[u8]) -> Option<bool> {
         let n = d.len() as u64;
@@ -581,12 +589,12 @@ fn has_avif_brand(d: &[u8]) -> bool {
             return Some(false);
         }
         let at = |p: u64| d.get(usize::try_from(p).ok()?..usize::try_from(p + 4).ok()?);
-        if at(off)? == b"avif" {
+        if at(off)? == b"avif" || at(off)? == b"mif3" {
             return Some(true);
         }
         let mut p = off + 8;
         while p + 4 <= end {
-            if at(p)? == b"avif" {
+            if at(p)? == b"avif" || at(p)? == b"mif3" {
                 return Some(true);
             }
             p += 4;
@@ -768,7 +776,10 @@ fn avif_text(name: &str, data: &[u8], dir: &Path, lim: &Limits) -> String {
             Ok(b) => b,
             Err(e) => return fail(name, &format!("item {}", it.id), e),
         };
-        if is_exif {
+        if is_exif && h.mini.is_some() {
+            // The `mini` box has no `exif_tiff_header_offset`: libavif keeps the whole item.
+            exif = b.to_vec();
+        } else if is_exif {
             let good = b.get(4..).filter(|rest| {
                 be32(&b, 0).is_some_and(|off| {
                     tiff_offset(rest).is_some_and(|e| u64::try_from(e) == Ok(u64::from(off)))
@@ -840,7 +851,9 @@ fn avif_text(name: &str, data: &[u8], dir: &Path, lim: &Limits) -> String {
         None => o.push_str("pasp -\n"),
     }
 
-    let gain = if h.ftyp.has_brand(b"tmap") {
+    // libavif adds the `tmap` brand itself for the gain map of a `mini` box.
+    let gain = if h.ftyp.has_brand(b"tmap") || h.mini.as_ref().is_some_and(|m| m.gain_map.is_some())
+    {
         img.gain_map
             .as_ref()
             .filter(|g| g.source == GainMapSource::Tmap)

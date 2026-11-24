@@ -12,7 +12,8 @@ All builds and tests run in CI (nothing runs on the owner's Mac).
 | `src/movie/*`, `tests/movie.rs` | MP4/MOV: stsc runs (an empty run, a run past the last chunk), skips against walks, `stsz`/`stz2`/`stco`/`co64` forms, `stss` rules, `stts`/`ctts` (short tables, signed offsets), `sync_sample_at` (before, exact, between, after, tie, none), overflow and end of file, external `dref`, QuickTime without `ftyp`, `NoMoov`, two `moov`, `cmov`, raw boxes kept once, limits and cancel, `read_movie` equals `parse_movie` |
 | doc-test in `src/lib.rs` | `parse`, `primary_image`, `item_bytes` and `read` on a built file, with explicit `Limits` |
 | `tests/parity` | libheif and libavif against `examples/oracle.rs` on the corpus (docs/parity.md) |
-| `tests/fuzz` | twelve cargo-fuzz targets (docs/fuzzing.md) |
+| `src/mini.rs`, `tests/mini.rs` | the `mini` box: bit reader, a header decoded by hand, every flag, chunk order, orientations, gain map, errors, limits, `read` equal to `parse`, damaged files, the fuzz seeds |
+| `tests/fuzz` | thirteen cargo-fuzz targets (docs/fuzzing.md) |
 
 Parity gates (`tests/parity/run.sh full`): corpus `diff -r` with `known-differences.tsv`; mutated
 files (truncations, bit flips, size edits) where both sides are `ok`; `--threads 1` and `--read`

@@ -15,7 +15,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY tests/fuzz/Cargo.toml tests/fuzz/Cargo.lock tests/fuzz/
 RUN mkdir -p src tests/fuzz/fuzz_targets && touch src/lib.rs \
-    && for t in parse read boxes iloc iinf iref ipma ipco derived tmap movie movie_read; do touch tests/fuzz/fuzz_targets/$t.rs; done \
+    && for t in parse read boxes iloc iinf iref ipma ipco derived tmap movie movie_read mini; do touch tests/fuzz/fuzz_targets/$t.rs; done \
     && cargo fetch --locked --manifest-path tests/fuzz/Cargo.toml \
     && rm -rf src tests/fuzz/fuzz_targets
 
@@ -66,7 +66,8 @@ RUN --mount=type=cache,id=isobmff-rs-target-arm64,sharing=locked,target=/src/tar
 
 # libheif v1.23.7 (LGPL-3.0) and libavif v1.4.2 (BSD-2-Clause) oracles, CI only, never linked into
 # the crate. Both are built from git at the pinned commit, static, with no codecs. The library
-# builds come first; tests/parity/c is copied after them, so a change to the .c files does not
+# builds come first (libavif with the experimental `mini` box reader on, libheif reads `mini` always);
+# tests/parity/c is copied after them, so a change to the .c files does not
 # rebuild the libraries.
 FROM debian:bookworm AS c-oracle
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake git ca-certificates pkg-config \
@@ -87,7 +88,7 @@ RUN git clone -q --depth 1 --branch v1.4.2 https://github.com/AOMediaCodec/libav
     && test "$(git -C /src/libavif rev-parse HEAD)" = c5240fc79fe5c2407e10afd35f5505ef6333ea49 \
     && cmake -S /src/libavif -B /b/avif -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/oracle -DBUILD_SHARED_LIBS=OFF \
        -DAVIF_CODEC_AOM=OFF -DAVIF_CODEC_DAV1D=OFF -DAVIF_CODEC_LIBGAV1=OFF -DAVIF_CODEC_RAV1E=OFF -DAVIF_CODEC_SVT=OFF \
-       -DAVIF_CODEC_AVM=OFF -DAVIF_LIBYUV=OFF -DAVIF_LIBSHARPYUV=OFF -DAVIF_LIBXML2=OFF \
+       -DAVIF_CODEC_AVM=OFF -DAVIF_LIBYUV=OFF -DAVIF_LIBSHARPYUV=OFF -DAVIF_LIBXML2=OFF -DAVIF_ENABLE_EXPERIMENTAL_MINI=ON \
        -DAVIF_BUILD_APPS=OFF -DAVIF_BUILD_TESTS=OFF \
     && cmake --build /b/avif -j"$(nproc)" && cmake --install /b/avif \
     && rm -rf /src/libavif /b/avif

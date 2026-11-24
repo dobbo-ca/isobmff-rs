@@ -62,7 +62,10 @@ grid <id> <columns>x<rows> tile=<w>x<h> out=<w>x<h> tiles=<ids>       tiles row-
 - `ref`: libheif `heif_context_get_item_references(ctx, from, index, ...)`, index 0, 1, ...
 - `prop`: libheif `heif_item_get_properties_of_type(..., heif_item_property_type_invalid, ...)`;
   `<n>` is the 1-based position in the item's ipma list (index 0 skipped). `irot` adds
-  `rot=<deg>` (anticlockwise), `imir` adds `axis=<0|1>`.
+  `rot=<deg>` (anticlockwise), `imir` adds `axis=<0|1>`. Properties of type `free` are not listed and
+  not counted in `<n>` on either side: libheif makes `free` placeholders for the unused slots of
+  a `mini` box. A real `free` box in `ipco` is rare (no corpus file has one), so this changes no
+  other file.
 - `prop`: a property that failed to parse is listed by libheif as type `ERR ` (`ERR%20`);
   isobmff-rs prints the same for `PropValue::Invalid`. Files where the two parsers disagree on
   what is broken (e.g. `pixi` with version other than 0) differ.
@@ -84,7 +87,8 @@ grid <id> <columns>x<rows> tile=<w>x<h> out=<w>x<h> tiles=<ids>       tiles row-
 
 ### `avif.txt` (avif_oracle and `oracle avif`)
 
-Only for files whose `ftyp` major or compatible brands include `avif`. Decoder settings:
+Only for files whose `ftyp` major or compatible brands include `avif` or `mif3` (the brand of a `mini`
+box file). Decoder settings:
 `requestedSource = AVIF_DECODER_SOURCE_PRIMARY_ITEM`, `strictFlags = AVIF_STRICT_DISABLED`,
 `imageContentToDecode = AVIF_IMAGE_CONTENT_ALL`, `imageDimensionLimit = 0`, `imageCountLimit = 0`,
 `imageSizeLimit` left at its default (16384 x 16384). First line `ok` or `error`:
@@ -93,7 +97,7 @@ Only for files whose `ftyp` major or compatible brands include `avif`. Decoder s
 size <w>x<h> depth=<8|10|12> yuv=<444|422|420|400>
 alpha <0|1> prem <0|1>
 icc <len>                                    bytes in avif-icc.bin when len > 0
-exif <len>                                   bytes after the 4-byte exif_tiff_header_offset (libavif) in avif-exif.bin
+exif <len>                                   bytes after the 4-byte exif_tiff_header_offset (libavif; a mini box has none: the whole item) in avif-exif.bin
 xmp <len>                                    bytes in avif-xmp.bin
 irot <deg>|-
 imir <axis>|-
@@ -115,7 +119,8 @@ gainmap-meta <fields>                        only when gainmap 1 (see below)
   fails the whole parse when one does not parse, so the avif oracle prints `error` for such a file.
 - `iden`: libheif checks the input of an `iden` only when decoding; the heif oracle reports an
   `iden` without exactly one `dimg` input as `note` (no image block), like isobmff-rs.
-- `gainmap` is 1 only when `ftyp` has the `tmap` brand and the tmap item is found (libavif rule).
+- `gainmap` is 1 only when `ftyp` has the `tmap` brand (for a `mini` box with a gain map: always, as
+  libavif adds the brand itself) and the tmap item is found (libavif rule).
   `gainmap-meta`: `base=<n>/<d> alt=<n>/<d> min=<n>/<d>,... max=... gamma=... baseoff=... altoff=... base_cs=<0|1>`
   per channel (3 channels; a single-channel map repeats channel 0).
 - If libavif fails with `AVIF_RESULT_INVALID_EXIF_PAYLOAD`, the oracle parses again with
@@ -184,6 +189,49 @@ skip <id> <reason>                                                (track not gat
   with an `s` or `e` line in ours are compared. Fields 4 and up must be equal unless ours is `-`. A
   key on one side only is a mismatch. The exception: for an id where ours has an `e` line, or when
   `fferr` is 1, only keys on both sides are compared and `at` lines are skipped.
+
+## The `mini` box in the two oracles
+
+Files with a top-level `mini` box (ISO/IEC 23008-12 Annex O, brand `mif3`) go through both pairs.
+libheif 1.23.7 expands them with no flag (`mini.cc` is always compiled); libavif v1.4.2 needs
+`-DAVIF_ENABLE_EXPERIMENTAL_MINI=ON` (set in `.github/ci/Dockerfile`) and `avif_oracle.c` and
+`oracle avif` accept the brand `mif3` (a mini file has no `avif` brand). isobmff-rs follows libheif
+where the two differ (the 7 mini files that were in `known-differences.tsv` are no longer there;
+the corpus gate says if one still differs):
+
+- **Syntax.** libheif 1.23.7 (the working draft) reads `matrix_coefficients` always (8 bits) when
+  `explicit_cicp_flag` is set and has `gainmap_dimension_same_as_main_item_flag`; libavif v1.4.2
+  reads `matrix_coefficients` only when `chroma_subsampling != 0` and has no same-size flag (its
+  master has the flag, not yet a release). A file with a gain map, or with explicit CICP on 4:0:0,
+  is read differently by the two: no corpus file has either.
+- **Codec.** Both take the codec from the `ftyp` minor version (`avif` or `heic`; libavif only
+  `avif`) when the box has no explicit codec types, so libavif fails the HEIC mini files (both
+  sides print `error`); the VVC `.hmg` files (minor `vvi3`) fail in libheif and isobmff-rs
+  (`Unsupported("mini codec")`). With explicit `infe_type` and `codec_config_type` libheif reads
+  and ignores them (it always uses the minor version); isobmff-rs uses them.
+- **Graph.** libheif has no `tmap` item, gain map item, `dimg` or `altr` group for a mini gain map
+  (its TODO) and no `prem` reference; isobmff-rs adds them (layout of libavif, `prem` as the spec
+  says). The `heif` side is the gate for items 1, 2, 6, 7; for a premultiplied alpha, a gain map or
+  a hidden item 4 a `known-differences.tsv` line says why.
+- **Properties.** libheif lists its `free` placeholders (the oracle skips them, see `prop` above);
+  pixi has 3 channels in libheif for 4:0:0 (not in `graph.txt`); orientation 5 is `irot` 270 and
+  `imir` axis 1 in libheif and isobmff-rs, `irot` 90 and `imir` axis 0 in libavif (the same
+  transform; the avif oracle prints only the first `irot` and `imir` of the image: differs for a
+  mini file with orientation 5).
+- **Exif.** The Exif chunk of a mini box has no `exif_tiff_header_offset`: libavif keeps the whole
+  chunk, libheif returns it raw, `Heif::metadata` returns it as is, and the Rust avif oracle does
+  the same.
+- **Strictness.** libavif requires zero padding bits, exact chunk sums (no trailing bytes), a
+  4-byte `av1C`, a matching `pixi` depth, no float, no compressed Exif or XMP; libheif and isobmff-rs
+  accept trailing bytes, any config size, float, compressed Exif/XMP (`cenc=deflate`) and do not
+  check padding. libavif therefore fails some mini files that isobmff-rs accepts; such files get a
+  `known-differences.tsv` line with `avif` as side.
+- **Version.** A `mini` of version other than 0 is `Unsupported("mini")`; libheif reads the field
+  and does not check it. No corpus file has a version other than 0.
+- **Corpus.** Nokia C75, C83 and 1dualMiniVVC (`.hmg`, VVC, no decoder here) and imazen
+  `lightning_mini.heif` (the pre-final draft syntax; isobmff-rs parses it and marks the hvcC invalid, libheif does not check its version: a known difference) are in the corpus. No public
+  file has a gain map in a `mini` box or sets the `hdr` flag: that path is covered by unit tests and
+  the `mini` fuzz target only.
 
 ## Gates (tests/parity/run.sh)
 

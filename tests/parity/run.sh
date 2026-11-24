@@ -12,7 +12,7 @@
 #                                compared with <ref-dir>
 # Binaries on PATH: isobmff-oracle (examples/oracle.rs), heif-oracle, avif-oracle (tests/parity/c);
 # for `arm` /usr/local/bin/isobmff-oracle-arm64, run by $ARM_RUN; for gate 5 ffprobe and gawk.
-# Environment: PARITY_MIN_INPUTS (default 600): the HEIF and AVIF corpus has about 630 files
+# Environment: PARITY_MIN_INPUTS (default 600): the HEIF and AVIF corpus has about 634 files
 # (corpus.toml), so a source that did not arrive fails gate 4 instead of shrinking the gates.
 # PARITY_MIN_MP4 (default 100): the least number of corpus files with a gated MP4 video track.
 # The sources named mp4-* in corpus.toml are read by gate 5 only.

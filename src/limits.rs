@@ -35,7 +35,7 @@ pub struct Limits {
     /// The most pixels of one image: `ispe` width x height and grid or overlay output size
     /// (default `1 << 30`, 32768 x 32768). [`Limit::Pixels`](crate::Limit::Pixels).
     pub max_pixels: u64,
-    /// The largest `meta` box or `ftyp` payload that [`read`](crate::read) copies (default 64 MiB).
+    /// The largest `meta` or `mini` box or `ftyp` payload that [`read`](crate::read) copies (default 64 MiB).
     /// [`Limit::MetaBytes`](crate::Limit::MetaBytes).
     pub max_meta_bytes: usize,
     /// The largest Exif or XMP item that [`Heif::metadata`](crate::Heif::metadata) returns

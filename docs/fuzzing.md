@@ -19,6 +19,7 @@ call `isobmff::__fuzz::*` (hidden, `fn(&[u8], &Limits) -> Result<(), Error>` on 
 | `tmap` | `__fuzz::tmap` | ISO 21496-1 payload, both layouts |
 | `movie` | `__fuzz::movie` | `parse_movie` on the whole input, then for every track a walk of all samples, `sync_samples(4)` and `sync_sample_at` at `i64::MIN`, 0 and `i64::MAX`, over `Cursor::new(data)` |
 | `movie_read` | `read_movie` over a `Cursor` | equals `parse_movie` (`Ok` and `Err`), and the first 256 samples of every track are equal |
+| `mini` | `__fuzz::mini` | the bit header and chunks of a `mini` box, then the graph built from it (the `ftyp` minor version is `avif` for an even length, `heic` for an odd one) |
 
 Every target uses a `max_alloc` far below `-malloc_limit_mb=512`; a peak above it is a bug in the
 charging.
@@ -26,7 +27,7 @@ charging.
 ## CI
 
 `.github/workflows/fuzz.yml` runs weekly, Monday 12:23 UTC (`cron: '23 12 * * 1'`), and on
-`workflow_dispatch`; never on push or pull request. Matrix over the twelve targets with
+`workflow_dispatch`; never on push or pull request. Matrix over the thirteen targets with
 `max-parallel: 2` (x86 only: no SIMD, so no arm64 job; the conventions ask for a fuzz-arm64 matrix, left out on purpose). Each target runs
 `cargo +nightly fuzz run --fuzz-dir tests/fuzz <target> ... -- -max_total_time=$MAX_TOTAL_TIME
 -timeout=60 -rss_limit_mb=2048 -malloc_limit_mb=512`. Crash artifacts are uploaded; the grown
@@ -47,6 +48,6 @@ gh workflow run fuzz.yml --ref <branch> -f only=tmap
 
 2.5 h, 0 crashes: fuzz.yml run 44581507012 on main 68eaa95, 10 targets x 900 s.
 
-Five targets (`iloc`, `iinf`, `iref`, `ipma`, `ipco`) and `derived` and `tmap` take a raw box or
+Five targets (`iloc`, `iinf`, `iref`, `ipma`, `ipco`) and `derived`, `tmap` and `mini` take a raw box or
 item payload, which a whole-file seed never reaches. `tests/fuzz/payload-seeds/<target>/` holds
 small hand-written payloads for them; the workflow passes that directory as an extra seed dir.

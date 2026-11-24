@@ -48,6 +48,7 @@ src/
     image.rs    ispe pixi pasp irot imir clap colr auxC lsel a1op a1lx
     config.rs   hvcC av1C (parsed header + raw range)
   derived.rs    grid, iovl, tmap payload parsers
+  mini.rs       the `mini` box (low-overhead HEIF/AVIF): bit header -> the same `Meta` as `meta`
   graph.rs      Image, ImageKind, Transform, Aux, GainMap, the item graph API
   metadata.rs   Exif / XMP item extraction
   movie/        MP4/MOV tracks: moov, sample tables kept as ranges, the sample walk (see "MP4/MOV tracks")
@@ -62,7 +63,7 @@ the input file. Construction method 1 (idat) extents are translated to absolute 
 - `isobmff::parse(data: &[u8], limits, cancel) -> Result<Heif, Error>`: the whole file is in
   memory. `Heif::slice(data, extent) -> Option<&[u8]>` gives a borrowed slice (zero copy).
 - `isobmff::read<R: Read + Seek>(r, limits, cancel) -> Result<Heif, Error>`: reads only the
-  top-level box headers, `ftyp` and the whole `meta` box (at most `Limits::max_meta_bytes`, the
+  top-level box headers, `ftyp` and the whole `meta` (or `mini`) box (at most `Limits::max_meta_bytes`, the
   copy is charged to `max_alloc`); it seeks over `mdat`. The `Heif` is the same as `parse` on the
   same bytes (a fuzz target and a test check this). The caller reads extents itself.
 
@@ -96,6 +97,11 @@ General ISO-BMFF reader, also used by the MP4/MOV tracks (`moov/trak/mdia/minf/s
    incomplete header or that runs past the end of the file (libheif and libavif stop reading
    there) ends the walk instead of being `Truncated`; item data past the end of the file then
    fails per item (`item_bytes` gives `Truncated`). Before `meta` and `moov` it is still `Truncated`.
+   A top-level `mini` box (ISO/IEC 23008-12 Annex O, brand `mif3`) takes the place of `meta` (see
+   "The `mini` box" below). A file with two `mini` boxes, or with a `mini` and a `meta`, is
+   `Malformed("mini")`. There is no brand check: any top-level `mini` is used (libheif does the
+   same; libavif needs `mif3` and no `avif` brand). The truncation rule above applies after
+   `mini` as after `meta`.
 3. `meta` is a FullBox (version 0). Its `hdlr` must be the first child with handler `pict` (else
    `Malformed("hdlr")`).
 
@@ -140,6 +146,85 @@ parse); the result vectors are charged through the `Budget`.
 Item errors do not fail the parse: `Item::data` is `Result<Vec<Extent>, ItemError>`. A request for
 that item's bytes gives the error. This matches libheif, which fails only when an item's data is
 read.
+
+## The `mini` box (`mini.rs`)
+
+A top-level `mini` box (ISO/IEC 23008-12 Annex O, brand `mif3`) holds a whole image in one bit-packed
+header and its chunks, with no `meta`. `mini::parse` reads it and builds the `Meta` that a `meta`
+box would give (items, `iloc`, `iref`, `ipco`, `ipma`, `grpl`), so `graph::build` and every `Heif`
+accessor are the ones of a normal file. `Heif::mini: Option<Mini>` also keeps every parsed header
+field and the `Extent` of every chunk (all absolute file offsets, a missing chunk has length 0).
+
+**Syntax.** The bits are read most significant first, as libheif 1.23.7 `mini.cc` (the working draft
+of the spec) reads them. It differs from libavif v1.4.2 in two places, which this crate follows
+libheif in (and docs/parity.md says where the oracles then disagree):
+
+- `matrix_coefficients` is always 8 bits when `explicit_cicp_flag` is set (libavif reads it only
+  when `chroma_subsampling != 0`).
+- `gainmap_dimension_same_as_main_item_flag` is present before the gain map width and height; when
+  set, they are the main size (libavif v1.4.2 does not have the flag; its master does).
+
+Fields in order: `version` 2 (must be 0, else `Error::Unsupported("mini")`); flags
+`explicit_codec_types float full_range alpha explicit_cicp hdr icc exif xmp`; `chroma_subsampling` 2;
+`orientation_minus1` 3; `large_dimensions`; width and height minus 1 (7 or 15 bits each);
+chroma centring flags (horizontal for 4:2:0 and 4:2:2, vertical for 4:2:0); bit depth (float:
+`log2 - 4` in 2 bits for 16, 32 or 64, the value 3 is `Malformed("mini")`; else a high bit depth
+flag and `depth - 9` in 3 bits, default 8); `alpha_is_premultiplied` when alpha; `colour_primaries`,
+`transfer_characteristics`, `matrix_coefficients` (8 bits each) when explicit, else 1 (2 with an ICC
+profile), 13 (2 with an ICC profile) and 6 (2 for 4:0:0); `infe_type` and `codec_config_type` (32 bits each)
+when explicit; with `hdr`: `gainmap_flag`, and with it the gain map fields (same-size flag, size,
+matrix, full range, chroma, float and depth as above, `tmap_icc_flag`, `tmap_explicit_cicp_flag`
+and its CICP and range, default 1 / 13 / 6 full range), then the HDR property block (six flags
+`clli mdcv cclv amve reve ndwt`, then the present payloads in that order) for the main item and,
+with a gain map, for the `tmap` item; `large_metadata` (only when icc, exif, xmp or a gain map),
+`large_codec_config`, `large_item_data`; the chunk sizes (icc, tmap icc, gain map metadata, gain map
+data and config, main config and data minus 1, alpha data and config, `exif_xmp_compressed`, exif
+and xmp); padding to a byte. Padding bits and bytes after the last chunk are not checked. The
+chunks follow in this order: main config, alpha config, gain map config (a config of size 0 is the
+main one), ICC, `tmap` ICC, gain map metadata, alpha data, gain map data, main data, Exif, XMP.
+The sum of the chunk sizes past the end of the payload is `Malformed("mini")` (`Truncated` when the
+box itself runs past the end of the file). All sizes are fixed-width bit fields of at most 32
+bits, so the header needs no limit of its own; chunk ends are checked sums and nothing is
+allocated from a size.
+
+**Codec.** With explicit codec types, the item type is `infe_type` and the configuration property
+type is `codec_config_type` (`vvc1`/`vvcC` gives an unsupported image, with the graph). Without,
+the `ftyp` minor version decides: `avif` gives `av01` / `av1C`, `heic` gives `hvc1` / `hvcC`; any
+other is `Error::Unsupported("mini codec")` (libheif fails those files too, for example the VVC
+`.hmg` files of Nokia). The configuration property is parsed from its chunk by the normal `hvcC`
+and `av1C` parsers; a configuration of size 0 gives no property (the image then fails with
+`Malformed("hvcC")` or `Malformed("av1C")`).
+
+**Graph** (the ids of libheif; item 1 is the primary item):
+
+| Item | Type | When | Data | Notes |
+|---|---|---|---|---|
+| 1 | `av01` / `hvc1` / explicit | always | main data | |
+| 2 | as 1 | alpha flag and `alpha_item_data_size > 0` | alpha data | `auxl` 2 to 1; `prem` 1 to 2 when `alpha_is_premultiplied` (libheif 1.23.7 omits `prem`) |
+| 3 | `tmap` | gain map | gain map metadata | `dimg` 3 to [1, 4] (or [1] without item 4), `altr` group [3, 1] (id 0); the derived payload is the byte 0 followed by the chunk, parsed by the normal `tmap` parser |
+| 4 | as 1, hidden | gain map data > 0 | gain map data | |
+| 6 | `Exif` | exif flag | Exif chunk | `cdsc` 6 to 1; no `exif_tiff_header_offset`: `Heif::metadata` returns the chunk as is |
+| 7 | `mime` `application/rdf+xml` | xmp flag | XMP chunk | `cdsc` 7 to 1; `content_encoding` `deflate` when `exif_xmp_compressed` (the bytes stay as stored) |
+
+Items 2, 6 and 7 are not hidden (libheif prints `hidden=0` for them). Item data are single extents
+of the chunks; an empty gain map metadata chunk gives an item with no extents.
+
+Properties are synthesised in `ipco` order main config, `ispe`, `pixi` (1 channel for 4:0:0, else 3),
+`colr` `nclx`, `colr` ICC (an `Extent` of the ICC chunk), alpha config, `auxC` (alpha URN), the HDR
+properties of the main item (`clli mdcv cclv amve ndwt`, as `PropValue::Other`; `reve` has none),
+`irot`, `imir`, then the gain map image's config, `ispe`, `pixi`, `colr` (`nclx` 2 / 2 / gain map
+matrix) and the `tmap` item's `ispe` (width and height swapped for orientations 5 to 8), `colr`
+`nclx` (when `tmap_explicit_cicp` or no `tmap` ICC), `colr` ICC and HDR properties. libheif's
+`free` placeholder properties are left out. A property without bytes of its own has the range
+`{ offset: payload start, length: 0 }`; configuration and ICC properties have their chunk range.
+Item 1 lists config, `ispe`, `pixi`, `colr` `nclx`, ICC, HDR properties, `irot`, `imir`; item 2
+config, `ispe` (shared with item 1), `auxC`, `irot`, `imir`; item 4 the same transforms as item 1.
+The config, `colr`, `auxC`, `irot` and `imir` associations are essential. The orientation maps as libheif does:
+2 `imir` axis 1, 3 `irot` 180, 4 `imir` axis 0, 5 `irot` 270 and `imir` axis 1 (libavif: `irot` 90
+and `imir` axis 0, the same transform), 6 `irot` 270, 7 `irot` 270 and `imir` axis 0, 8 `irot` 90.
+
+`read` copies the `mini` box like `meta` (at most `max_meta_bytes`, charged to `max_alloc`).
+`__fuzz::mini` runs the parser and the graph on a raw payload.
 
 ## Properties (`props/`)
 
@@ -230,6 +315,7 @@ pub struct Heif {
     pub groups: Vec<EntityGroup>,   // grpl order
     pub other_boxes: Vec<(FourCc, Extent)>, // other meta children (ipro, dinf, unknown), whole box
     pub iprp_other: Vec<(FourCc, Extent)>,  // iprp children other than ipco/ipma, whole box
+    pub mini: Option<Mini>,         // the top-level `mini` box, when the file has one instead of `meta`
     pub has_moov: bool,
     pub stats: Stats,               // boxes visited, max depth
 }
@@ -286,7 +372,9 @@ pub struct Image {
   `mime` with content type `application/rdf+xml`.
 - Metadata bytes: Exif item payload = `exif_tiff_header_offset: u32` (big endian) then that many
   bytes, then the TIFF header. `metadata()` gives the bytes from the TIFF header on (what
-  `exif::Exif::parse` takes); a bad offset is `Malformed("Exif")`. XMP is the item bytes as is.
+  `exif::Exif::parse` takes); a bad offset is `Malformed("Exif")`. XMP is the item bytes as is. The
+  Exif item of a `mini` box has no offset field (libavif skips it too): `metadata()` gives its bytes
+  as they are (`Heif::mini` is `Some`).
 
 ## MP4/MOV tracks (`movie/`)
 
@@ -482,7 +570,7 @@ variant: `Error::LimitExceeded(Limit::X)`.
 | `max_extents` | 1 000 000 | iloc extents, all items together; also the work of resolving construction method 2 (its extents and the source extents it visits) | max_iloc_extents_per_item 32 |
 | `max_grid_tiles` | 65 536 | rows x columns of one grid; inputs of one iovl | max_number_of_tiles 4096 x 4096 |
 | `max_pixels` | 1 << 30 (32768 x 32768) | ispe width x height, grid and iovl output width x height | max_image_size_pixels 32768 x 32768 |
-| `max_meta_bytes` | 64 MiB | size of the `meta` box that `read` copies | - |
+| `max_meta_bytes` | 64 MiB | size of the `meta` or `mini` box that `read` copies | - |
 | `max_metadata_bytes` | 64 MiB | one Exif or XMP item (bytes) that `metadata()` returns | max_memory_block_size 4 GiB |
 | `max_moov_bytes` | 64 MiB | size of the `moov` box (and `ftyp` payload) that `read_movie` copies | - |
 
@@ -515,10 +603,10 @@ fix the rule, not the oracle.
 `#[doc(hidden)] pub mod __fuzz` exposes one function per parser, each `fn(&[u8], &Limits) ->
 Result<(), Error>` on a raw payload (a cancel flag that is never set is made inside):
 `boxes` (walk every box to `max_depth`, recursing into every child that parses as a box list),
-`iloc`, `iinf`, `iref`, `ipma`, `ipco` (every property parser), `grid`, `iovl`, `tmap`, `ftyp`, and `movie` (a whole file).
+`iloc`, `iinf`, `iref`, `ipma`, `ipco` (every property parser), `grid`, `iovl`, `tmap`, `ftyp`, `mini` (the payload of a `mini` box, then the graph built from it and every item looked at; the `ftyp` minor version is `avif` for an even length and `heic` for an odd one) and `movie` (a whole file).
 The fuzz crate (tests/fuzz) has the targets `parse` (whole file + every graph call + metadata),
 `read` (`read` over a `Cursor` equals `parse`), `boxes`, `iloc`, `iinf`, `iref`, `ipma`, `ipco`,
-`derived` (grid + iovl), `tmap`, `movie` (whole file: `parse_movie` and every walk of every track),
+`derived` (grid + iovl), `tmap`, `mini`, `movie` (whole file: `parse_movie` and every walk of every track),
 `movie_read` (`read_movie` over a `Cursor` equals `parse_movie`, same first samples). A target's input is
 the payload as is, except `parse`, `read`, `movie` and `movie_read`, which take a whole file.
 
@@ -530,7 +618,8 @@ Spec of the oracle output: docs/parity.md. Summary:
   source with no codecs, security limits off). Writes per input a directory with `graph.txt` and
   `item-<id>.bin` (item data) and `icc-<id>.bin`.
 - `tests/parity/c/avif_oracle.c`: libavif 1.4.2 (`c5240fc7`, BSD-2, no codecs). Writes
-  `avif.txt` (+ `avif-*.bin`) for the primary item of AVIF files.
+  `avif.txt` (+ `avif-*.bin`) for the primary item of AVIF files (`avif` or `mif3` brand; built with
+  `AVIF_ENABLE_EXPERIMENTAL_MINI=ON` so it reads `mini` boxes). libheif reads `mini` without a flag.
 - `examples/oracle.rs`: the same files from isobmff-rs. `diff -r` of the trees is the gate.
 - ffprobe (Debian bookworm ffmpeg 5.1.x, CI only) and `oracle mp4`: the MP4/MOV tracks (gate 5).
   `oracle mp4` writes `tracks.txt` (the samples of every video track and the nearest sync sample at 18
@@ -561,7 +650,7 @@ Spec of the oracle output: docs/parity.md. Summary:
 
 The item graph exposes and keeps every item, property, reference and entity group: Exif, XMP,
 ICC and nclx, gain-map items, depth, thumbnails, and unknown items and properties as raw byte
-ranges. Every other child of `meta` (`ipro`, `dinf`, unknown boxes) is kept as a (type, whole-box range) in `Heif::other_boxes`, every child of `iprp` other than `ipco` and `ipma` in `Heif::iprp_other` (same shape, charged by doubling), and the protection index of each item is kept. Dropped while parsing: `iloc` entries with no `infe`, and `ipma` entries for unknown ids (none of these is reachable from an item). v1 writes no files; any later API that writes or
+ranges. The `mini` box, when the file has one, is kept as `Heif::mini` with every header field and chunk range. Every other child of `meta` (`ipro`, `dinf`, unknown boxes) is kept as a (type, whole-box range) in `Heif::other_boxes`, every child of `iprp` other than `ipco` and `ipma` in `Heif::iprp_other` (same shape, charged by doubling), and the protection index of each item is kept. Dropped while parsing: `iloc` entries with no `infe`, and `ipma` entries for unknown ids (none of these is reachable from an item). v1 writes no files; any later API that writes or
 filters a file keeps all of these by default and drops them only on an explicit option.
 
 The movie view keeps the same way: every box of `moov`, `trak` and the top level that is not parsed is a (type, whole-box range) in `Movie::other_boxes` or `Track::other_boxes`, and the parsed sample tables are kept as ranges in `Track::tables`.

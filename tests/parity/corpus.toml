@@ -9,8 +9,8 @@
 # syntax). fetch.sh anchors each at the repo root; * does not cross /, ** does.
 #
 # Counts of files per source at the pinned commit (research of 2026-11-19, from the GitHub API):
-# libavif 63, libheif 240, link-u 156, av1-avif 17, mpeg-ffc 61, nokia-conformance-extra 19,
-# mp4parse-rust 69, imazen-heic 1, aaron-rust-hdr 4: about 630. run.sh gates on PARITY_MIN_INPUTS
+# libavif 63, libheif 240, link-u 156, av1-avif 17, mpeg-ffc 61, nokia-conformance-extra 22,
+# mp4parse-rust 69, imazen-heic 2, aaron-rust-hdr 4: about 634. run.sh gates on PARITY_MIN_INPUTS
 # (default 600).
 #
 # Not used, on purpose: Netflix and Chimera files of av1-avif (CC BY-NC-ND), libavif
@@ -60,14 +60,16 @@ exclude = []
 licence = "LICENSE:1-3: \"The Clear BSD License / Copyright (c) 2023, Apple Inc.\""
 
 # Commit on the gh-pages branch of nokiatech/heif, not on its default branch. The conformance
-# files that the MPEG repo does not have: C043..C053, C71, MIAF*.
+# files that the MPEG repo does not have: C043..C053, C71, MIAF*, and the mini box files C71.heic,
+# C75.hmg, C83.hmg, 1dualMiniVVC.hmg (the VVC ones have no explicit codec types: both libheif and
+# isobmff-rs reject them; C83_dup.hmg is the same blob as C83.hmg).
 [[source]]
 name = "nokia-conformance-extra"
 repo = "https://github.com/nokiatech/heif"
 commit = "f01283f3e64ccc6e6ab489bd556d454879069185"
-include = ["content/conformance/C04[3-9].heic", "content/conformance/C05[0-3].heic", "content/conformance/C71.heic", "content/conformance/MIAF*.heic"]
+include = ["content/conformance/C04[3-9].heic", "content/conformance/C05[0-3].heic", "content/conformance/C71.heic", "content/conformance/C75.hmg", "content/conformance/C83.hmg", "content/conformance/1dualMiniVVC.hmg", "content/conformance/MIAF*.heic"]
 exclude = []
-licence = "CONTENT-LICENSES.md section 7: \"Freely redistributable for conformance testing and demonstration.\""
+licence = "CONTENT-LICENSES.md:148-160, section 7: \"Freely redistributable for conformance testing and demonstration.\" (C71.heic, C75.hmg, C83.hmg, 1dualMiniVVC.hmg listed by name)"
 
 [[source]]
 name = "mp4parse-rust"
@@ -77,14 +79,15 @@ include = ["mp4parse/tests/**/*.avif", "mp4parse_capi/tests/*.avif"]
 exclude = []
 licence = "repository licence MPL-2.0 (no data-specific statement)"
 
-# Only the Apple HDR gain map sample, which testdata/README.md licenses separately.
+# The Apple HDR gain map sample and the libheif example `lightning_mini.heif` of the pre-final
+# mini box draft syntax (isobmff-rs parses it, with an invalid hvcC), which testdata/README.md licenses separately.
 [[source]]
 name = "imazen-heic"
 repo = "https://github.com/imazen/heic"
 commit = "4d72caddb4c1d664237a8d3693f35d69ac80caaf"
-include = ["testdata/apple-hdr/*.heic"]
+include = ["testdata/apple-hdr/*.heic", "testdata/libheif-examples/lightning_mini.heif"]
 exclude = []
-licence = "testdata/README.md, apple-hdr: \"Licensed under the MIT License\""
+licence = "testdata/README.md: apple-hdr \"Licensed under the MIT License\"; testdata/README.md:7-10 libheif-examples \"Licensed under the MIT License (see libheif-examples/COPYING)\""
 
 [[source]]
 name = "aaron-rust-hdr"

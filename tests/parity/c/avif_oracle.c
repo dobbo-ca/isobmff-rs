@@ -65,7 +65,8 @@ static uint32_t be32(const uint8_t *p)
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
 
-/* 1 when the first box is an ftyp whose major or a compatible brand is `avif`. */
+/* 1 when the first box is an ftyp whose major or a compatible brand is `avif` or `mif3` (the brand of
+ * a mini box file, which libavif reads with AVIF_ENABLE_EXPERIMENTAL_MINI). */
 static int has_avif_brand(const uint8_t *d, size_t n)
 {
     uint64_t size, off = 8, end, p;
@@ -86,11 +87,11 @@ static int has_avif_brand(const uint8_t *d, size_t n)
     if (end < off + 8) {
         return 0;
     }
-    if (!memcmp(d + off, "avif", 4)) {
+    if (!memcmp(d + off, "avif", 4) || !memcmp(d + off, "mif3", 4)) {
         return 1;
     }
     for (p = off + 8; p + 4 <= end; p += 4) { /* skip the minor version at off + 4 */
-        if (!memcmp(d + p, "avif", 4)) {
+        if (!memcmp(d + p, "avif", 4) || !memcmp(d + p, "mif3", 4)) {
             return 1;
         }
     }
