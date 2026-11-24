@@ -8,7 +8,7 @@ Pure Rust, no dependencies, `#![forbid(unsafe_code)]`, bounded on hostile input.
 are the parity oracles in CI.
 
 ```toml
-isobmff = { git = "https://github.com/dobbo-ca/isobmff-rs", rev = "68eaa9583a590ae3ef687594ed73dc9ff991ca45" }
+isobmff = { git = "https://github.com/dobbo-ca/isobmff-rs", rev = "3a6579a61b4a4b5eb535f297afa4a0899ed1afd6" }
 ```
 
 ## Quick start
