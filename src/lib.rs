@@ -1,4 +1,4 @@
-//! An ISO-BMFF container parser for HEIF (HEIC), AVIF and, later, MP4/MOV. It decodes no pixels.
+//! An ISO-BMFF container parser for HEIF (HEIC), AVIF and the tracks of MP4/MOV. It decodes no pixels.
 //!
 //! [`parse`] (a file in memory) and [`read`] (a `Read + Seek`) give a [`Heif`]: the item graph of
 //! the file. Every coded item is a codec configuration record ([`Hvcc`], [`Av1c`]) plus byte
@@ -66,7 +66,9 @@
 //!
 //! - `max_alloc` (default 256 MiB) is the enforced peak of the working memory of one call: each
 //!   buffer whose size comes from the input (items, properties, references, extents, the copy of
-//!   `meta` that [`read`] makes, metadata copies) is charged before it is allocated. More is
+//!   `meta` that [`read`] makes, the copies of `moov` and `moof` that [`read_movie`] makes, the
+//!   windows of a sample walk, the result of [`Track::sync_samples`], metadata copies) is charged
+//!   before it is allocated. More is
 //!   [`Error::LimitExceeded`]`(`[`Limit::Alloc`]`)`.
 //! - `max_threads` (default `available_parallelism`): this crate never spawns a thread, so every
 //!   call runs on the calling thread for every value, including 1.
@@ -75,7 +77,8 @@
 //!   `max_metadata_bytes`, `max_moov_bytes`) each give [`Error::LimitExceeded`] with their own [`Limit`]. The
 //!   defaults are far above every real phone and camera file.
 //! - Set the cancel flag from another thread to stop a call: it returns [`Error::Cancelled`].
-//!   The flag is checked every 1024 boxes and before each item is read.
+//!   The flag is checked every 1024 boxes, before each item is read, at each refill of a window
+//!   of a sample walk and every 4096 samples of a walk.
 //! - A bad item does not fail the parse: the error of one item (an extent past the end of the
 //!   file, a data reference other than 0) is in [`Item::data`] and surfaces when that item's
 //!   bytes are requested. A bad property fails only the images that use it.
@@ -589,7 +592,7 @@ pub mod __fuzz {
         super::ftyp::parse(data, &budget).map(|_| ())
     }
 
-    /// `parse_movie`, then for every track a walk of all samples, `sync_samples(4)` (for a fragmented file only on tracks of at most 65 536 samples) and
+    /// `parse_movie`, then for every track a walk of the first 65 536 samples, `sync_samples(4)` and
     /// `sync_sample_at` at `i64::MIN`, 0 and `i64::MAX`, all over `Cursor::new(data)`.
     ///
     /// # Errors
@@ -601,14 +604,10 @@ pub mod __fuzz {
         for t in &m.tracks {
             let walk = t.samples(std::io::Cursor::new(data), limits, &cancel);
             let _ = walk.take(1 << 16).take_while(Result::is_ok).count();
-            // Fragment runs can overlap, so a walk to the end is bounded only by the cancel flag.
-            if t.sample_count <= 1 << 16 || !m.fragmented {
-                let _ = t.sync_samples(std::io::Cursor::new(data), 4, limits, &cancel);
-            }
-            if t.sample_count <= 1 << 16 {
-                for at in [i64::MIN, 0, i64::MAX] {
-                    let _ = t.sync_sample_at(std::io::Cursor::new(data), at, limits, &cancel);
-                }
+            // The scans stop at a sample number above the file length, so they are bounded by it.
+            let _ = t.sync_samples(std::io::Cursor::new(data), 4, limits, &cancel);
+            for at in [i64::MIN, 0, i64::MAX] {
+                let _ = t.sync_sample_at(std::io::Cursor::new(data), at, limits, &cancel);
             }
         }
         Ok(())
@@ -927,6 +926,7 @@ mod tests {
             let _ = __fuzz::tmap(data, &l);
             let _ = __fuzz::ftyp(data, &l);
             let _ = __fuzz::movie(data, &l);
+            let _ = __fuzz::mini(data, &l);
         }
     }
 }

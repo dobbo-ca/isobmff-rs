@@ -1052,8 +1052,15 @@ fn mp4_text<R: Read + Seek>(
                 }
             }
         }
-        // ffmpeg drops the samples of a second sample description.
-        if all.iter().any(|s| s.entry != 1) {
+        // ffmpeg drops the samples of a sample description whose fourcc differs from the first
+        // one (mov.c:2582-2588); an entry with the same fourcc keeps its samples (mov.c:2143).
+        let first_kind = t.entries.first().map(|e| e.kind);
+        if all.iter().any(|s| {
+            t.entries
+                .get((s.entry as usize).saturating_sub(1))
+                .map(|e| e.kind)
+                != first_kind
+        }) {
             let _ = writeln!(o, "skip {} entry", t.id);
             continue;
         }

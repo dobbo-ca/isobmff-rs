@@ -1,11 +1,14 @@
-/// Caps on one call. `parse`, `read`, `item_bytes` and `metadata` take `&Limits` and a cancel
-/// flag; there is no unlimited entry point. The defaults are finite and far above every real phone and camera
+/// Caps on one call. `parse`, `read`, `item_bytes`, `metadata`, `parse_movie`, `read_movie` and
+/// the sample walks of `Track` take `&Limits` and a cancel flag; there is no unlimited entry
+/// point. The defaults are finite and far above every real phone and camera
 /// file (an iPhone 48 MP file has 48 tiles in one grid).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// The peak working memory of one call, in bytes (default 256 MiB): every buffer whose size
     /// comes from the input (items, properties, references, extents, the copy of `meta` that
-    /// [`read`](crate::read) makes, metadata copies) is charged before it is allocated. More is
+    /// [`read`](crate::read) makes, the copies of `moov` and `moof` that
+    /// [`read_movie`](crate::read_movie) makes, the windows of a sample walk and the result of
+    /// `Track::sync_samples`, metadata copies) is charged before it is allocated. More is
     /// [`Error::LimitExceeded`](crate::Error::LimitExceeded)`(`[`Limit::Alloc`](crate::Limit::Alloc)`)`.
     pub max_alloc: usize,
     /// The most OS threads one call uses (default `std::thread::available_parallelism()`). This
@@ -20,13 +23,14 @@ pub struct Limits {
     /// The most `infe` entries, `iloc` items and `ipma` entries, each counted alone (default
     /// 65 535). [`Limit::Items`](crate::Limit::Items).
     pub max_items: usize,
-    /// The most `ipco` children (default 65 535); the associations of one call are capped at 16
-    /// times this. [`Limit::Properties`](crate::Limit::Properties).
+    /// The most `ipco` children (`parse`, `read`), or the most children of the sample entries of
+    /// all tracks together (`parse_movie`, `read_movie`) (default 65 535); the associations of one call are capped at 16 times this. [`Limit::Properties`](crate::Limit::Properties).
     pub max_properties: usize,
     /// The most `to` ids of all `iref` boxes plus entity ids of `grpl`, together (default
     /// 1 000 000). [`Limit::References`](crate::Limit::References).
     pub max_references: usize,
-    /// The most `iloc` extents, all items together (default 1 000 000).
+    /// The most `iloc` extents, all items together, and the same count for the work of resolving
+    /// construction method 2 (default 1 000 000).
     /// [`Limit::Extents`](crate::Limit::Extents).
     pub max_extents: usize,
     /// The most tiles of one grid (rows x columns) and inputs of one overlay (default 65 536).

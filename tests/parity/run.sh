@@ -169,17 +169,21 @@ mp4_cmp() {
   fe=0
   [ "$(cat "$ft.rc" 2> /dev/null)" = 0 ] || fe=1
   [ ! -s "$ft.err" ] || fe=1
-  gawk -M -v fferr=$fe -f tests/parity/mp4cmp.awk "$W/m1/$1/tracks.txt" "$ft.txt" > $W/d1 2>&1
+  perr=0
+  ! grep -qE '^error (malformed|unsupported)$' "$W/m1/$1/tracks.txt" 2> /dev/null || perr=1
+  gawk -M -v fferr=$fe -v perr=$perr -f tests/parity/mp4cmp.awk "$W/m1/$1/tracks.txt" "$ft.txt" > $W/d1 2>&1
 }
 
-# mp4_corpus: gate 5a and the count of gate 5d. Every corpus file whose isobmff-rs tracks.txt has
-# a sample or an error line of a gated track goes through ffprobe; known-differences.tsv lines of
+# mp4_corpus: gate 5a and the count of gate 5d. Every corpus file whose isobmff-rs tracks.txt has an
+# `error malformed` or `error unsupported` line (a parse failure: ffprobe must read no packets from
+# it either, else it needs a known-differences line), or a
+# sample or an error line of a gated track, goes through ffprobe; known-differences.tsv lines of
 # side mp4 work as in gate 1. $gated counts the files with at least one sample line.
 mp4_corpus() {
   : > $W/d-mp4; : > $W/d-mp4cover
   gated=0
   while IFS= read -r n; do
-    grep -qE '^(s|e) ' "$W/m1/$n/tracks.txt" 2> /dev/null || continue
+    grep -qE '^((s|e) |error (malformed|unsupported)$)' "$W/m1/$n/tracks.txt" 2> /dev/null || continue
     echo "$n${tab}mp4" >> $W/seen
     ! grep -q '^s ' "$W/m1/$n/tracks.txt" || gated=$((gated + 1))
     mp4_cmp "$n"

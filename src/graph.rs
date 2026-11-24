@@ -1042,7 +1042,9 @@ impl Heif {
     /// item payload is a big-endian `exif_tiff_header_offset`, that many bytes, then the TIFF
     /// header: the result starts at the TIFF header (what `exif::Exif::parse` takes). The XMP
     /// packet is the item bytes as they are. Borrowed from `data` for a one-extent item. The Exif
-    /// item of a `mini` box has no offset field: its bytes are the TIFF data as they are.
+    /// item of a `mini` box has no offset field: its bytes are the TIFF data as they are, or a
+    /// deflate stream when the item's `content_encoding` is `deflate` (`exif_xmp_compressed_flag`).
+    /// Nothing is inflated: check [`Item::content_encoding`] of the items before parsing.
     ///
     /// # Errors
     ///

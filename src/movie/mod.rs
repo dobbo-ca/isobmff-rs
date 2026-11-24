@@ -154,7 +154,8 @@ pub struct Sample {
     pub number: u64,
     /// The sample bytes, as an absolute range of the file.
     pub range: Extent,
-    /// Decode time in the media timescale, from the first sample (0) and no edit list.
+    /// Decode time in the media timescale, no edit list: the samples of `moov` count from 0;
+    /// fragment samples continue from `tfdt` when present, else from the end of the previous run.
     pub dts: i64,
     /// Composition offset (`ctts`, read as signed for both versions), 0 when there is none.
     pub cto: i32,
@@ -252,7 +253,7 @@ fn first_box_ok(kind: Option<&[u8]>) -> bool {
 /// `moov` runs past the end of `data` (after `moov`, a damaged tail ends the walk);
 /// [`Error::Unsupported`] for `cmov`; [`Error::Malformed`] for an invalid box (two `moov`, a
 /// missing or duplicate required box, a table whose count does not fit its box, a `moof` without
-/// `mvex`, a `traf` without `trex` or a `trun` whose records do not fit its box, ...);
+/// `mvex`, a `trun` before its `tfhd` or a `trun` whose records do not fit its box, ...);
 /// [`Error::LimitExceeded`]; [`Error::OutOfMemory`]; [`Error::Cancelled`].
 pub fn parse_movie(data: &[u8], limits: &Limits, cancel: &AtomicBool) -> Result<Movie, Error> {
     let budget = Budget::new(limits, cancel);

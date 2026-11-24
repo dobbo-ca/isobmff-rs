@@ -33,14 +33,17 @@ pub enum Limit {
 /// match on the limit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// The input does not start with an `ftyp` box.
+    /// The first box is not one the entry point accepts: `ftyp` for [`parse`](crate::parse) and
+    /// [`read`](crate::read); `ftyp`, `moov`, `mdat`, `free`, `skip`, `wide` or `pnot` for
+    /// [`parse_movie`](crate::parse_movie) and [`read_movie`](crate::read_movie), which also
+    /// give it for a file shorter than 8 bytes.
     UnknownFormat,
     /// The file has no top-level `meta` box.
     NoMeta,
     /// [`parse_movie`](crate::parse_movie) or [`read_movie`](crate::read_movie): the file has no
     /// top-level `moov` box.
     NoMoov,
-    /// A box or the data of an item runs past the end of the input.
+    /// A box, the data of an item or a sample of a track runs past the end of the input.
     Truncated,
     /// A structure is invalid. The text names it, for example `"iloc"`. It is a short stable
     /// token, not a sentence.
@@ -55,7 +58,8 @@ pub enum Error {
     OutOfMemory,
     /// The cancel flag was set.
     Cancelled,
-    /// The reader of [`read`](crate::read) failed (the kind of the I/O error; an early end of
+    /// The reader of [`read`](crate::read), [`read_movie`](crate::read_movie) or a sample walk of
+    /// a `Track` failed (the kind of the I/O error; an early end of
     /// the file is [`Error::Truncated`] instead).
     Io(std::io::ErrorKind),
 }
