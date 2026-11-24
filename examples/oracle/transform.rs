@@ -374,10 +374,33 @@ fn max_diff(a: &Pl, b: &Pl) -> (u32, usize) {
     (m, n)
 }
 
-/// Largest luma difference allowed for a `libheif-444-rgb` row: libheif converted that image to
-/// 4:4:4 through RGB (its YCbCr 4:2:0 to 4:4:4 step refuses the input, chroma_sampling.cc:459),
-/// so its luma is rounded twice. A wrong crop or turn of a photo gives far larger differences.
-const RGB_TOL: u32 = 3;
+/// 8-bit studio range to full range: round((v - 16) * 255 / 219), clamped.
+fn full(v: u8) -> u32 {
+    ((i32::from(v) - 16) * 255 + 109)
+        .div_euclid(219)
+        .clamp(0, 255) as u32
+}
+
+/// For 8-bit planes: the largest |a - full(b)| and |b - full(a)|, so the gate tells whether one
+/// side is the other with its luma rescaled from studio to full range.
+fn range_diff(a: &Pl, b: &Pl) -> Option<(u32, u32)> {
+    if a.bps != 1 || b.bps != 1 {
+        return None;
+    }
+    let z = a.data.iter().zip(b.data);
+    let ab = z
+        .clone()
+        .map(|(&x, &y)| u32::from(x).abs_diff(full(y)))
+        .max()?;
+    let ba = z.map(|(&x, &y)| u32::from(y).abs_diff(full(x))).max()?;
+    Some((ab, ba))
+}
+
+/// Largest luma difference allowed for a `libheif-444-rgb` row after the range rescale: libheif
+/// converted that image to 4:4:4 through RGB (its YCbCr 4:2:0 to 4:4:4 step refuses the input,
+/// chroma_sampling.cc:459), so its luma changes range and is rounded twice. Run 3 (no rescale):
+/// max 19 over 99.8% of the samples. A wrong crop or turn of a photo fails the rescaled check.
+const RGB_TOL: u32 = 2;
 
 /// Compares the isobmff-rs result `b` with the libheif result `a`; `Ok` is the number of planes
 /// compared. A known entry (libheif changed the chroma format to 4:4:4) compares the luma plane
@@ -399,10 +422,15 @@ fn compare(a: &Parsed, b: &Parsed, raw: &Parsed, known: bool, rgb: bool) -> Resu
                 continue;
             }
             if let Some(d) = plane_diff(x, y, k) {
-                // libheif-444-rgb: libheif's luma went through RGB; allow RGB_TOL, never a size change
+                // libheif-444-rgb: libheif's luma went through RGB and came back in another range;
+                // one side must be the other rescaled from studio to full range, within RGB_TOL
                 let (m, cnt) = max_diff(x, y);
-                if !(rgb && k == 0 && (x.w, x.h, x.bps) == (y.w, y.h, y.bps) && m <= RGB_TOL) {
-                    return Err(format!("{d} (max |diff| {m}, {cnt} samples)"));
+                let r = range_diff(x, y);
+                let same = (x.w, x.h, x.bps) == (y.w, y.h, y.bps);
+                if !(rgb && k == 0 && same && r.is_some_and(|(p, q)| p.min(q) <= RGB_TOL)) {
+                    return Err(format!(
+                        "{d} (max |diff| {m}, {cnt} samples; range-rescaled {r:?})"
+                    ));
                 }
             }
             n += 1;
@@ -606,7 +634,7 @@ pub fn run_cmp(args: &[String]) {
          | transform: images compared | {} |\n\
          | transform: planes compared | {} |\n\
          | transform: exact matches (planes or the same error) | {} |\n\
-         | transform: known differences (libheif-444: luma and alpha exact, chroma skipped; libheif-444-rgb: luma within 3) | {} |\n\
+         | transform: known differences (libheif-444: luma and alpha exact, chroma skipped; libheif-444-rgb: luma range-rescaled within 2) | {} |\n\
          | transform: failures | {} |\n",
         c.visited,
         c.inputs,
