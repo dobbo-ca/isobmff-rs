@@ -998,6 +998,19 @@ fn moof_before_moov() {
 }
 
 #[test]
+fn moof_inside_moov_is_malformed() {
+    let tr = Trak::video(1, &[stts(&[]), stsc(&[]), stsz(&[]), stco(&[])]).build();
+    let m = moov(
+        &[tr],
+        &[
+            bx(b"mvex", &trex(1, 1, 10, 4, 0)),
+            moof(&[traf(&[tfhd(1, 0, &[])])]),
+        ],
+    );
+    assert_eq!(parse_err(&mp4(&m, 4)), Error::Malformed("moov"));
+}
+
+#[test]
 fn fragment_errors() {
     let id = |id, flags: u32| tfhd(id, flags, &[]);
     let run = || trun(0, 0, 1, &[], &[]);

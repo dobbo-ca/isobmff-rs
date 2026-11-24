@@ -174,6 +174,7 @@ skip <id> <reason>                                                (track not gat
   | `dts` and `pts` | a track with any `stts` delta above `0xFFF8ACFF` (ffmpeg clips it: `mov.c:3039-3047`, `9144`) |
   | `K` of one sample (and every `at` of the track) | a fragment sample that is sync by its flags but has depends_on bit `0x0100_0000` set (ffmpeg's keyframe rule: `!(flags & (non-sync | depends-yes))`, `mov.c:5198-5203`) |
   | `pts` and every `at` | a track with fragment samples and any negative cto (ffmpeg's dts_shift is not cancelled for `trun` samples: `mov.c:5179`) |
+  | `size` of one sample | a fragment sample that starts in a top-level box and ends past it: with a moof index ffmpeg cuts a packet at the end of that box (`mov.c:7840-7846`, `8775-8777`) |
 
 - **Why the fields are comparable.** ffmpeg sets index dts to `raw - dts_shift` (`mov.c:4102`) and pts
   to `dts + dts_shift + ctts` (`mov.c:8842`), so pts equals our `dts + cto` exactly. dts is compared

@@ -83,7 +83,7 @@ fn stts_total(ctx: &Ctx<'_>, t: &Table) -> Result<i64, Error> {
     let end = t.entries.end().ok_or(BAD)?;
     let bytes = ctx.slice(t.entries.offset..end)?;
     let mut total: u64 = 0;
-    for (i, e) in bytes.chunks_exact(8).enumerate() {
+    for (i, e) in bytes.as_chunks::<8>().0.iter().enumerate() {
         if i & 4095 == 4095 {
             ctx.budget.check_cancel()?;
         }

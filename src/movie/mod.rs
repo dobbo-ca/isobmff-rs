@@ -473,6 +473,8 @@ fn parse_moov(
                 push(ctx.budget, &mut m.tracks, t)?;
             }
             b"cmov" => return Err(Error::Unsupported("cmov")),
+            // A `moov` that swallowed the boxes after it (a size of 0 or too large).
+            b"moof" => return Err(Error::Malformed("moov")),
             b"mvex" => {
                 m.fragmented = true;
                 keep(ctx.budget, other, &c)?;

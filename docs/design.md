@@ -463,7 +463,7 @@ impl Track {
 - **cmov.** A `cmov` (compressed moov) is `Unsupported("cmov")`.
 - **Damaged tail.** After `moov`, a top-level box with an incomplete header or one that runs past the end of the file ends the walk, as in HEIF. Before `moov` it is `Truncated`.
 - **other_boxes.** Every other top-level box goes into `Movie::other_boxes` where it is met, and so does each `moov` child that is not parsed, at the place of `moov` in the file order: `mdat`, `free`, `meta`, `udta`, `mvex`, `sidx`, `styp`, `uuid`, and so on. The `moof` boxes are parsed, not listed; their children that are not parsed come last.
-- **moof.** Every top-level `moof` is parsed after `moov`, in file order.
+- **moof.** Every top-level `moof` is parsed after `moov`, in file order. A `moof` inside `moov` (a `moov` that swallowed the top-level boxes after it) is `Malformed("moov")`.
 
 ### Boxes parsed and boxes kept raw
 
