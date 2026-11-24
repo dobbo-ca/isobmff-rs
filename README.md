@@ -66,4 +66,5 @@ Each limit returns `Error::LimitExceeded(Limit::...)`. No thread is ever spawned
 
 [design](docs/design.md), [parity](docs/parity.md), [limits](docs/limits.md), [threading](docs/threading.md),
 [safety](docs/safety.md), [fuzzing](docs/fuzzing.md), [benchmarks](docs/benchmarks.md),
-[dependencies](docs/dependencies.md), [testing](docs/testing.md), [gain maps](docs/gainmap.md), [corpus](docs/corpus.md).
+[dependencies](docs/dependencies.md), [testing](docs/testing.md), [gain maps](docs/gainmap.md), [corpus](docs/corpus.md),
+[transforms](docs/transforms.md) (`apply_transforms`: clap, irot, imir on decoded planes).

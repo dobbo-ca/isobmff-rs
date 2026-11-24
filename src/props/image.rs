@@ -82,6 +82,59 @@ fn crop_origin(dim: i128, size: i128, off_n: i128, off_d: i128) -> Option<i128> 
     t.checked_div(d).filter(|&v| v >= 0)
 }
 
+/// `(n + d / 2) / d`, truncating toward zero: the `round` of libheif's `Fraction`. `d` is positive.
+fn round_div(n: i128, d: i128) -> Option<i128> {
+    n.checked_add(d.checked_div(2)?)?.checked_div(d)
+}
+
+/// One axis of [`Clap::crop_rounded`]: the first and last sample, inclusive, after libheif's
+/// clamping, or `None`. `lead` is true for the horizontal axis, whose first sample is truncated;
+/// the vertical axis rounds it (libheif's asymmetry). Every fraction is exact.
+fn rounded_span(
+    dim: u32,
+    (size_n, size_d): (u32, u32),
+    (off_n, off_d): (i32, u32),
+    lead: bool,
+) -> Option<(i128, i128)> {
+    let int32 = |v: u32| i32::try_from(v).ok().map(i128::from);
+    let (dim, size_n, size_d, off_d) = (
+        i128::from(dim),
+        int32(size_n)?,
+        int32(size_d).filter(|&d| d > 0)?,
+        int32(off_d).filter(|&d| d > 0)?,
+    );
+    if !(1..=2_147_483_648).contains(&dim) || round_div(size_n, size_d)? < 1 {
+        return None;
+    }
+    // first = off_n/off_d + (dim - 1)/2 - (size_n - size_d)/(2 size_d), over one denominator.
+    let span = size_n.checked_sub(size_d)?;
+    let den = off_d.checked_mul(size_d)?.checked_mul(2)?;
+    let num = i128::from(off_n)
+        .checked_mul(size_d)?
+        .checked_mul(2)?
+        .checked_add(
+            dim.checked_sub(1)?
+                .checked_mul(off_d)?
+                .checked_mul(size_d)?,
+        )?
+        .checked_sub(span.checked_mul(off_d)?)?;
+    let first = if lead {
+        num.checked_div(den)?
+    } else {
+        round_div(num, den)?
+    };
+    // last = round((size - 1) + first), from the unclamped first.
+    let last = round_div(span.checked_add(first.checked_mul(size_d)?)?, size_d)?;
+    let first = first.max(0);
+    // libheif casts to uint32 before comparing: a negative last is clamped like one past the edge.
+    let last = if last < 0 || last >= dim {
+        dim.checked_sub(1)?
+    } else {
+        last
+    };
+    (first <= last).then_some((first, last))
+}
+
 impl Clap {
     /// The crop rectangle of this aperture on an image of `width` x `height`, with exact
     /// fractions (the rule of libavif `avifCropRectFromCleanApertureBox`, `src/avif.c`, BSD-2):
@@ -112,6 +165,50 @@ impl Clap {
             y: u32::try_from(y).ok()?,
             width: u32::try_from(cw).ok()?,
             height: u32::try_from(ch).ok()?,
+        })
+    }
+
+    /// The crop rectangle with the rounding of libheif (v1.23.7, `Box_clap::get_crop` and the
+    /// clamping in `ImageItem::decode_and_postprocess`), used as a design reference: no code is
+    /// copied. It accepts the files that [`crop`](Self::crop) rejects. With `W` x `H` the image
+    /// size at this point of the transform list:
+    ///
+    /// ```text
+    /// left   = trunc(offX + (W - 1)/2 - (clapW - 1)/2)       right  = round((clapW - 1) + left)
+    /// top    = round(offY + (H - 1)/2 - (clapH - 1)/2)       bottom = round((clapH - 1) + top)
+    /// ```
+    ///
+    /// `trunc` is division toward zero and `round(n/d) = (n + d/2)/d` truncated, so the two axes
+    /// differ on a half. `right` and `bottom` use the unclamped `left` and `top`. Then `left` and
+    /// `top` are raised to 0, a `right` or `bottom` that is negative or at least `W` or `H` becomes
+    /// `W - 1` or `H - 1` (libheif compares as unsigned, so a rectangle entirely left of or above
+    /// the image becomes the full width or height), and `left > right` or `top > bottom` (entirely
+    /// right of or below the image) gives `None`.
+    ///
+    /// Fractions are exact (`i128`, checked, never a panic). libheif's `Fraction`
+    /// loses precision (a denominator above 65 536, a numerator above 65 536 with a denominator
+    /// above 1, `W - 1` or `H - 1` above 65 536, intermediate products beyond `i32`), so the result
+    /// can differ from libheif there. `None` also for: a zero or negative-as-`i32` denominator, a width or
+    /// height numerator above `i32::MAX`, a rounded clap width or height below 1 (libheif fails the
+    /// load), and `W` or `H` of 0 or above 2^31.
+    pub fn crop_rounded(&self, width: u32, height: u32) -> Option<Rect> {
+        let (x0, x1) = rounded_span(
+            width,
+            (self.width_n, self.width_d),
+            (self.horiz_off_n, self.horiz_off_d),
+            true,
+        )?;
+        let (y0, y1) = rounded_span(
+            height,
+            (self.height_n, self.height_d),
+            (self.vert_off_n, self.vert_off_d),
+            false,
+        )?;
+        Some(Rect {
+            x: u32::try_from(x0).ok()?,
+            y: u32::try_from(y0).ok()?,
+            width: u32::try_from(x1.checked_sub(x0)?.checked_add(1)?).ok()?,
+            height: u32::try_from(y1.checked_sub(y0)?.checked_add(1)?).ok()?,
         })
     }
 }
@@ -365,5 +462,107 @@ mod tests {
             b.extend_from_slice(&n.to_be_bytes());
         }
         assert_eq!(a1lx(&b, 0), Ok(PropValue::A1lx { sizes: [1, 2, 3] }));
+    }
+
+    fn rr(c: Clap, w: u32, h: u32) -> Option<(u32, u32, u32, u32)> {
+        c.crop_rounded(w, h).map(|r| (r.x, r.y, r.width, r.height))
+    }
+
+    #[test]
+    fn crop_rounded_matches_hand_computed_libheif_values() {
+        // Even sizes: the exact centre.
+        assert_eq!(
+            rr(clap(50, 1, 50, 1, 0, 1, 0, 1), 100, 100),
+            Some((25, 25, 50, 50))
+        );
+        // 5 x 5, 2 x 2: left = trunc(1.5) = 1, top = round(1.5) = 2.
+        assert_eq!(rr(clap(2, 1, 2, 1, 0, 1, 0, 1), 5, 5), Some((1, 2, 2, 2)));
+        // A half offset: both origins are exactly 2.
+        assert_eq!(rr(clap(2, 1, 2, 1, 1, 2, 1, 2), 5, 5), Some((2, 2, 2, 2)));
+        // Partly outside on the left: left -5 is raised to 0, right = 44.
+        assert_eq!(
+            rr(clap(50, 1, 50, 1, -30, 1, 0, 1), 100, 100),
+            Some((0, 25, 45, 50))
+        );
+        // Partly outside on the right: left 75, right 124 is clamped to 99.
+        assert_eq!(
+            rr(clap(50, 1, 50, 1, 50, 1, 0, 1), 100, 100),
+            Some((75, 25, 25, 50))
+        );
+        // A fractional width, 5/2: round(2.5) = 3 wide, left = trunc(4.5 - 0.75) = 3, right = 5.
+        assert_eq!(rr(clap(5, 2, 4, 1, 0, 1, 0, 1), 10, 10), Some((3, 3, 3, 4)));
+        // The largest denominators: width 1, centred.
+        assert_eq!(
+            rr(
+                clap(i32::MAX as u32, i32::MAX as u32, 1, 1, 0, 1, 0, 1),
+                10,
+                10
+            ),
+            Some((4, 5, 1, 1))
+        );
+    }
+
+    #[test]
+    fn crop_rounded_libheif_quirks_and_rejections() {
+        // Entirely right of the image: left 23 > right 9.
+        assert_eq!(rr(clap(4, 1, 4, 1, 20, 1, 0, 1), 10, 10), None);
+        // Entirely left of the image: libheif clamps the negative right to W - 1, the full width.
+        assert_eq!(
+            rr(clap(4, 1, 4, 1, -20, 1, 0, 1), 10, 10),
+            Some((0, 3, 10, 4))
+        );
+        // i32::MIN offsets do not overflow.
+        assert_eq!(
+            rr(clap(4, 1, 4, 1, i32::MIN, 1, i32::MIN, 1), 10, 10),
+            Some((0, 0, 10, 10))
+        );
+        assert!(
+            clap(4, 1, 4, 1, i32::MAX, 1, i32::MAX, 1)
+                .crop_rounded(10, 10)
+                .is_none()
+        );
+        // Zero, huge and negative-as-i32 denominators.
+        assert_eq!(rr(clap(4, 0, 4, 1, 0, 1, 0, 1), 10, 10), None);
+        assert_eq!(rr(clap(4, 1, 4, 0, 0, 1, 0, 1), 10, 10), None);
+        assert_eq!(rr(clap(4, 1, 4, 1, 0, 0, 0, 1), 10, 10), None);
+        assert_eq!(rr(clap(4, 1, 4, 1, 0, 1, 0, 0), 10, 10), None);
+        assert_eq!(rr(clap(4, u32::MAX, 4, 1, 0, 1, 0, 1), 10, 10), None);
+        assert_eq!(rr(clap(4, 1, 4, 1, 0, u32::MAX, 0, 1), 10, 10), None);
+        // A width numerator above i32::MAX, a width that rounds to 0, an empty width.
+        assert_eq!(rr(clap(u32::MAX, 1, 4, 1, 0, 1, 0, 1), 10, 10), None);
+        assert_eq!(rr(clap(1, i32::MAX as u32, 4, 1, 0, 1, 0, 1), 10, 10), None);
+        assert_eq!(rr(clap(0, 1, 4, 1, 0, 1, 0, 1), 10, 10), None);
+        // An empty image, and one larger than 2^31.
+        assert_eq!(rr(clap(4, 1, 4, 1, 0, 1, 0, 1), 0, 10), None);
+        assert_eq!(rr(clap(4, 1, 4, 1, 0, 1, 0, 1), 10, u32::MAX), None);
+        // The widest allowed image, with the widest clap, does not overflow.
+        assert!(
+            clap(
+                i32::MAX as u32,
+                1,
+                i32::MAX as u32,
+                1,
+                i32::MIN,
+                1,
+                i32::MIN,
+                1
+            )
+            .crop_rounded(1 << 31, 1 << 31)
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn crop_rounded_equals_crop_when_the_origin_is_an_integer() {
+        for (w, h, cw, ch) in [
+            (200u32, 100u32, 100u32, 50u32),
+            (101, 101, 99, 51),
+            (64, 48, 64, 48),
+        ] {
+            let c = clap(cw, 1, ch, 1, 0, 1, 0, 1);
+            if let Some(r) = c.crop(w, h) {
+                assert_eq!(c.crop_rounded(w, h), Some(r), "{w}x{h} {cw}x{ch}");
+            }
+        }
     }
 }

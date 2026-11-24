@@ -6,14 +6,15 @@ All builds and tests run in CI (nothing runs on the owner's Mac).
 |---|---|
 | `src/boxes.rs` | box headers: size, largesize, size 0, uuid, bad sizes, depth and box limits |
 | `src/ftyp.rs`, `src/meta/*` | brands; iinf/infe, iloc v0..v2 (extent resolution, idat, method 2, errors), iref, ipma/ipco |
-| `src/props/*` | ispe, pixi, colr, irot, imir, clap (`Clap::crop` rule), auxC, hvcC, av1C |
+| `src/props/*` | ispe, pixi, colr, irot, imir, clap (`Clap::crop` and `Clap::crop_rounded` rules), auxC, hvcC, av1C |
 | `src/derived.rs` | grid, iovl, tmap: both tmap layouts, bad denominators, trailing bytes |
 | `src/graph.rs`, `src/metadata.rs` | image kinds, transforms, alpha/depth/thumbnails, gain maps, top-level images, Exif/XMP bytes |
 | `src/movie/*`, `tests/movie.rs` | MP4/MOV: stsc runs (an empty run, a run past the last chunk), skips against walks, `stsz`/`stz2`/`stco`/`co64` forms, `stss` rules, `stts`/`ctts` (short tables, signed offsets), `sync_sample_at` (before, exact, between, after, tie, none), overflow and end of file, external `dref`, QuickTime without `ftyp`, `NoMoov`, two `moov`, `cmov`, raw boxes kept once, limits and cancel, `read_movie` equals `parse_movie` |
 | doc-test in `src/lib.rs` | `parse`, `primary_image`, `item_bytes` and `read` on a built file, with explicit `Limits` |
 | `tests/parity` | libheif and libavif against `examples/oracle.rs` on the corpus (docs/parity.md) |
 | `src/mini.rs`, `tests/mini.rs` | the `mini` box: bit reader, a header decoded by hand, every flag, chunk order, orientations, gain map, errors, limits, `read` equal to `parse`, damaged files, the fuzz seeds |
-| `tests/fuzz` | thirteen cargo-fuzz targets (docs/fuzzing.md) |
+| `src/transform.rs`, `tests/transform.rs` | `apply_transforms`: every rotation and mirror on 8 and 16-bit planes of every chroma format and odd and even sizes against a per-sample reference, rotate x4 and mirror x2 identity, clap offsets and the chroma rule, 4:2:2 rotation, alpha, bad layouts, limits, cancel, `transformed_size` on random lists, the `max_alloc` peak to the byte |
+| `tests/fuzz` | fourteen cargo-fuzz targets (docs/fuzzing.md) |
 
 Parity gates (`tests/parity/run.sh full`): corpus `diff -r` with `known-differences.tsv`; mutated
 files (truncations, bit flips, size edits) where both sides are `ok`; `--threads 1` and `--read`

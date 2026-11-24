@@ -289,8 +289,10 @@ pub struct Image {
 }
 
 impl Image {
-    /// The size after the transforms, in order: a `clap` with a valid crop sets the crop size
-    /// (an invalid one is left out, see [`Clap::crop`]), `irot` 90 or 270 swaps the axes, `imir`
+    /// The size after the transforms, in order, by the rule of
+    /// [`apply_transforms`](crate::apply_transforms): a `clap` with a [`Clap::crop_rounded`]
+    /// rectangle sets the crop size
+    /// (one that `apply_transforms` rejects is left out here), `irot` 90 or 270 swaps the axes, `imir`
     /// keeps the size. `None` when the image has no `ispe`.
     pub fn display_size(&self) -> Option<(u32, u32)> {
         if self.width == 0 && self.height == 0 {
@@ -300,7 +302,7 @@ impl Image {
         for t in &self.transforms {
             match t {
                 Transform::Clap(c) => {
-                    if let Some(r) = c.crop(w, h) {
+                    if let Some(r) = c.crop_rounded(w, h) {
                         (w, h) = (r.width, r.height);
                     }
                 }
@@ -1139,6 +1141,33 @@ mod tests {
         assert_eq!(image(0, 0, vec![]).display_size(), None);
     }
 
+    #[test]
+    fn display_size_uses_the_rounded_crop_and_agrees_with_transformed_size() {
+        let clap = |wn, hn, hon| Clap {
+            width_n: wn,
+            width_d: 1,
+            height_n: hn,
+            height_d: 1,
+            horiz_off_n: hon,
+            horiz_off_d: 1,
+            vert_off_n: 0,
+            vert_off_d: 1,
+        };
+        // 5 x 5 with a 2 x 2 clap: the origin is 1.5, which `Clap::crop` rejects and
+        // `crop_rounded` rounds, so the size is 2 x 2.
+        let t = vec![Transform::Clap(clap(2, 2, 0)), Transform::Rotate(90)];
+        let i = image(5, 5, t.clone());
+        assert_eq!(i.display_size(), Some((2, 2)));
+        assert_eq!(crate::transformed_size(5, 5, &t), Ok((2, 2)));
+        // Partly outside: clamped, 45 wide.
+        let t = vec![Transform::Clap(clap(50, 50, -30))];
+        assert_eq!(image(100, 100, t.clone()).display_size(), Some((45, 50)));
+        assert_eq!(crate::transformed_size(100, 100, &t), Ok((45, 50)));
+        // Rejected by `apply_transforms`: left out of the display size.
+        let t = vec![Transform::Clap(clap(4, 4, 20)), Transform::Rotate(90)];
+        assert_eq!(image(10, 20, t.clone()).display_size(), Some((20, 10)));
+        assert!(crate::transformed_size(10, 20, &t).is_err());
+    }
     #[test]
     fn span_finds_equal_keys() {
         let idx = [(1, 0), (3, 1), (3, 2), (5, 3)];
