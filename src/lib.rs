@@ -59,6 +59,47 @@
 //! # Ok::<(), isobmff::Error>(())
 //! ```
 //!
+//! # Transforms
+//!
+//! [`apply_transforms`] applies the `clap`, `irot` and `imir` properties of an image
+//! ([`Image::transforms`], in ipma order) to planes that hevc-rs or av1-rs decoded;
+//! [`transformed_size`] gives the resulting size without planes. Every new buffer is charged to
+//! `max_alloc`, the output size to `max_pixels`, and the cancel flag is checked at least every
+//! 64 rows. The sample type is `isobmff::transform::Samples` (also `isobmff::PlaneSamples`), because
+//! `isobmff::Samples` is the sample walk of a track. See `docs/transforms.md`.
+//!
+//! ```
+//! use std::sync::atomic::AtomicBool;
+//! use isobmff::transform::Samples; // `isobmff::PlaneSamples` too: `isobmff::Samples` is the track walk
+//! use isobmff::{apply_transforms, Axis, Chroma, Limits, Plane, Planes, Transform};
+//!
+//! let plane = |width, height, samples: Vec<u8>| Plane { width, height, samples: Samples::U8(samples) };
+//! // 4 x 2 luma, 4:2:0 chroma 2 x 1.
+//! let planes = Planes {
+//!     width: 4,
+//!     height: 2,
+//!     chroma: Chroma::Yuv420,
+//!     planes: vec![
+//!         plane(4, 2, vec![0, 1, 2, 3, 4, 5, 6, 7]),
+//!         plane(2, 1, vec![10, 11]),
+//!         plane(2, 1, vec![20, 21]),
+//!     ],
+//! };
+//! let limits = Limits { max_threads: 1, max_alloc: 64 << 20, ..Limits::default() };
+//! let cancel = AtomicBool::new(false);
+//! let out = apply_transforms(
+//!     planes,
+//!     &[Transform::Rotate(90), Transform::Mirror(Axis::LeftRight)],
+//!     &limits,
+//!     &cancel,
+//! )?;
+//! assert_eq!((out.width, out.height, out.chroma), (2, 4, Chroma::Yuv420));
+//! assert_eq!(out.planes[0].samples, Samples::U8(vec![7, 3, 6, 2, 5, 1, 4, 0]));
+//! assert_eq!(out.planes[1].samples, Samples::U8(vec![11, 10]));
+//! assert_eq!(out.planes[2].samples, Samples::U8(vec![21, 20]));
+//! # Ok::<(), isobmff::Error>(())
+//! ```
+//!
 //! # Resource limits
 //!
 //! `parse`, `read`, `item_bytes`, `metadata`, `parse_movie`, `read_movie` and the sample walks of
@@ -113,6 +154,7 @@ mod metadata;
 mod mini;
 mod movie;
 mod props;
+pub mod transform;
 
 pub use boxes::Extent;
 pub use derived::{Fraction, GainMapChannel, GainMapMetadata, Grid, Overlay, OverlayInput};
@@ -129,6 +171,9 @@ pub use metadata::Metadata;
 pub use mini::{Mini, MiniAmve, MiniCclv, MiniClli, MiniGainMap, MiniHdr, MiniMdcv, MiniReve};
 pub use movie::{Edit, Movie, Sample, SampleEntry, Samples, Track, parse_movie, read_movie};
 pub use props::{Av1c, Axis, Clap, Colour, Hvcc, NalArray, PropValue, Property, Rect};
+pub use transform::{
+    Chroma, Plane, Planes, Samples as PlaneSamples, apply_transforms, transformed_size,
+};
 
 use boxes::{BoxHeader, Boxes, Ctx, Src, decode_header};
 use budget::Budget;

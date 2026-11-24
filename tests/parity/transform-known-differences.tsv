@@ -1,0 +1,8 @@
+# Known differences of the transform oracle (docs/parity.md, "Transforms"): images where libheif
+# changes the chroma format of a 4:2:0 or 4:2:2 image to 4:4:4 and isobmff-rs does not (or converts
+# differently). One row per image: file<TAB>image id<TAB>libheif-444. The luma and alpha planes of a
+# listed image are compared exactly, the chroma planes are skipped. A row that is not such a case
+# (libheif gives another chroma format, or the file was not compared) fails the gate as stale.
+# The rows of the generated files (unci_*) are not listed here: `oracle gen-transforms` predicts
+# them from the geometry and the gate adds them. List the corpus files here.
+file	image	reason

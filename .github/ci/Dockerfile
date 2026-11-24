@@ -15,7 +15,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY tests/fuzz/Cargo.toml tests/fuzz/Cargo.lock tests/fuzz/
 RUN mkdir -p src tests/fuzz/fuzz_targets && touch src/lib.rs \
-    && for t in parse read boxes iloc iinf iref ipma ipco derived tmap movie movie_read mini; do touch tests/fuzz/fuzz_targets/$t.rs; done \
+    && for t in parse read boxes iloc iinf iref ipma ipco derived tmap movie movie_read mini transform; do touch tests/fuzz/fuzz_targets/$t.rs; done \
     && cargo fetch --locked --manifest-path tests/fuzz/Cargo.toml \
     && rm -rf src tests/fuzz/fuzz_targets
 
@@ -100,6 +100,32 @@ RUN gcc -O2 -std=gnu99 -Wall -c -o /tmp/heif_oracle.o /c/heif_oracle.c $(pkg-con
     && gcc -O2 -std=gnu99 -Wall -c -o /tmp/avif_oracle.o /c/avif_oracle.c $(pkg-config --cflags libavif) \
     && g++ -o /usr/local/bin/avif-oracle /tmp/avif_oracle.o -static-libstdc++ -static-libgcc $(pkg-config --static --libs libavif)
 
+# libheif v1.23.7 again (same commit), for the transform oracle only: with the HEVC decoder libde265
+# and the AV1 decoder dav1d from Debian bookworm, and the uncompressed codec, in its own prefix
+# /opt/oracle-tr. The no-codec libheif of `c-oracle` and its outputs are not changed. Only
+# transform_oracle.c is copied (a change to the other .c files does not rebuild this stage).
+# The Debian -dev packages ship static libraries; the runtime packages are installed in
+# `transform-tools` in case the link falls back to the shared ones.
+FROM debian:bookworm AS c-oracle-tr
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake git ca-certificates pkg-config libde265-dev libdav1d-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone -q --depth 1 --branch v1.23.7 https://github.com/strukturag/libheif /src/libheif \
+    && test "$(git -C /src/libheif rev-parse HEAD)" = 12a259a5882dd99d45ec5fc77e296a3b620d1e2e \
+    && cmake -S /src/libheif -B /b/heif -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/oracle-tr \
+       -DBUILD_SHARED_LIBS=OFF -DENABLE_PLUGIN_LOADING=OFF -DBUILD_TESTING=OFF -DBUILD_DOCUMENTATION=OFF \
+       -DWITH_LIBDE265=ON -DWITH_DAV1D=ON -DWITH_X265=OFF -DWITH_X264=OFF -DWITH_OpenH264_DECODER=OFF -DWITH_KVAZAAR=OFF \
+       -DWITH_AOM_DECODER=OFF -DWITH_AOM_ENCODER=OFF -DWITH_RAV1E=OFF -DWITH_SvtEnc=OFF \
+       -DWITH_JPEG_DECODER=OFF -DWITH_JPEG_ENCODER=OFF -DWITH_OpenJPEG_DECODER=OFF -DWITH_OpenJPEG_ENCODER=OFF \
+       -DWITH_OPENJPH_ENCODER=OFF -DWITH_FFMPEG_DECODER=OFF -DWITH_UVG266=OFF -DWITH_VVDEC=OFF -DWITH_VVENC=OFF \
+       -DWITH_UNCOMPRESSED_CODEC=ON -DWITH_HEADER_COMPRESSION=OFF -DWITH_LIBSHARPYUV=OFF \
+       -DWITH_EXAMPLES=OFF -DWITH_GDK_PIXBUF=OFF \
+    && cmake --build /b/heif -j"$(nproc)" && cmake --install /b/heif \
+    && rm -rf /src/libheif /b/heif
+ENV PKG_CONFIG_PATH=/opt/oracle-tr/lib/pkgconfig:/opt/oracle-tr/lib/x86_64-linux-gnu/pkgconfig
+COPY tests/parity/c/transform_oracle.c /c/transform_oracle.c
+RUN gcc -O2 -std=gnu99 -Wall -c -o /tmp/transform_oracle.o /c/transform_oracle.c $(pkg-config --cflags libheif) \
+    && g++ -o /usr/local/bin/heif-transform-oracle /tmp/transform_oracle.o -static-libstdc++ -static-libgcc $(pkg-config --static --libs libheif)
+
 # The public corpus (tests/parity/corpus.toml: blobless sparse checkouts at pinned commits) in a
 # cache mount, so a build downloads it once. sharing=locked: two builds never download at once.
 # Only the list of the source variants of this corpus.toml (fetch.sh: v/<key>/<name>, written once,
@@ -155,6 +181,32 @@ RUN --mount=type=cache,id=isobmff-rs-data,target=/data,sharing=locked,readonly \
 
 FROM scratch AS parity-report
 COPY --from=parity /report /
+
+# Transform oracle (tests/parity/transform.sh): libheif with libde265, dav1d and the unci codec
+# against isobmff::apply_transforms, on the corpus and on generated unci files. Same layout as the
+# parity stage: the stage never fails on a diff, the report (summary.md, transform.diff, status) is
+# the build output (target transform-report), and the workflow fails on `status`. The tools come
+# before `COPY . .`; the runtime packages of libde265 and dav1d are for a link that fell back to the
+# shared libraries (a no-op when the static ones were used).
+FROM toolchain AS transform-tools
+RUN apt-get update && apt-get install -y --no-install-recommends libde265-0 libdav1d6 \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM transform-tools AS transform-src
+ENV CARGO_NET_OFFLINE=true
+COPY . .
+
+FROM transform-src AS transform
+COPY --from=c-oracle-tr /usr/local/bin/heif-transform-oracle /usr/local/bin/heif-transform-oracle
+COPY --from=data /data.list /data.list
+RUN --mount=type=cache,id=isobmff-rs-target-parity,sharing=locked,target=/src/target \
+    find src examples tests -name '*.rs' -exec touch {} + \
+    && cargo build --locked --release --example oracle && cp target/release/examples/oracle /usr/local/bin/isobmff-oracle
+RUN --mount=type=cache,id=isobmff-rs-data,target=/data,sharing=locked,readonly \
+    mkdir -p /report && { sh tests/parity/transform.sh /report; echo $? > /report/status; }
+
+FROM scratch AS transform-report
+COPY --from=transform /report /
 
 # The oracle built for aarch64, run under qemu-user on the libheif and libavif test data, compared
 # with the x86_64 trees above.

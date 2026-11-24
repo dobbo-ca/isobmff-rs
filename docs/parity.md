@@ -304,6 +304,37 @@ the corpus gate says if one still differs):
 `summary.md` lists the counts, the corpus maxima (items, references per box, grid tiles, extents
 per item, boxes, depth) that docs/limits.md cites, and the first 200 diff lines.
 
+## Transforms (tests/parity/transform.sh)
+
+Oracle for `isobmff::apply_transforms` (`src/transform.rs`): libheif v1.23.7 at the same commit as above, built a second time in its own prefix (`c-oracle-tr` in `.github/ci/Dockerfile`) with libde265 and dav1d from Debian bookworm and the uncompressed codec. The no-codec libheif of the other gates is unchanged. It runs in the `parity` job of ci.yml as a second build (target `transform-report`, artifact `parity-transform`); like the other gates it does not run on pull requests.
+
+**Settings.** `heif-transform-oracle` (`tests/parity/c/transform_oracle.c`) decodes every top-level image, its auxiliary images (alpha, depth, gain map: whatever libheif lists with `heif_image_handle_get_list_of_auxiliary_image_IDs` and `..._depth_image_IDs`) with `colorspace` and `chroma` undefined, so libheif keeps the native planes, and `output_image_nclx_profile_passthrough = 1`, so it does not colour-convert. It decodes twice: with `ignore_transformations = 1` (raw) and with the transforms of the item (expected). The upsampling algorithm is not set: libheif converts to 4:4:4 with its own default options (bilinear) whatever the caller asks, and has no nearest-neighbour YCbCr to YCbCr conversion. Images above 64 Mpixel (`ispe`) are not decoded.
+
+**What libheif does.** It applies `irot`, `imir` and `clap` in `ipma` order, one operation per property (no MIAF order is enforced; a second `irot`, `imir` or `clap` is an error even with `ignore_transformations`). `clap` uses the size after the transforms before it. A crop clamps left and top to 0 and a right or bottom edge past the image (or negative) to the last column or row, so a rectangle entirely right of or below the image is an error (token `clap`) and one entirely left of or above it keeps the full width or height. Alpha is decoded as its own item with its own transforms, not those of the main image, and scaled (nearest neighbour) to the size of the main image if the sizes differ. Auxiliary images likewise take only their own transforms.
+
+**Plane format** (`.planes`, both sides, one file per image named `<item id>.planes`):
+
+```
+planes <chroma 400|420|422|444> <w>x<h> <nplanes>\n      w x h is the luma size
+<w>x<h> <bytes per sample 1|2>\n                          one line per plane
+<samples of plane 0><samples of plane 1>...                rows packed, stride = width, 2-byte samples little-endian
+```
+
+Planes are Y, then Cb and Cr unless the chroma is 400, then an alpha plane if the image has one (full size). Chroma planes are `ceil(w/sx) x ceil(h/sy)`. A sample is 1 byte when libheif reports 8 bits or fewer for that channel, else 2 bytes (the value in the low bits). An image that cannot be written (not planar YCbCr or monochrome) gets `<id>.err` with a token in the raw tree and is not compared. In the result trees `<id>.err` holds `clap` (the one error libheif and `Error::Malformed("clap")` share), `decode` or `error`.
+
+**Trees.** `raw/<name>/` is the libheif decode without transforms; `exp/<name>/` is libheif with the transforms; `rs/<name>/` is `oracle transform`, which parses the same file, applies `Image::transforms` of item `<id>` (for the alpha plane: the transforms of the alpha item) to the raw planes with `apply_transforms`, and writes the same format. `oracle transform-cmp` compares `exp` with `rs`.
+
+**Gate 6** (`transform.diff` must be empty):
+
+- Every image with raw planes must give the same bytes (header and planes), or the same error token on both sides.
+- Known differences: `tests/parity/transform-known-differences.tsv` (file, image id, reason) lists images where libheif changes the chroma format of a 4:2:0 or 4:2:2 image to 4:4:4 (reason `libheif-444`). Only libheif changes the chroma format; isobmff-rs keeps it, except 4:2:2 turned by 90 or 270 degrees, which has no 4:2:2 result and becomes 4:4:4 by sample replication, and libheif's bilinear upsampling differs from replication. For a listed image the luma plane and the alpha plane must still be equal, the chroma planes are skipped. A listed entry fails the gate as stale when libheif's result is not 4:4:4 for a 4:2:0 or 4:2:2 raw image, or when the file was not compared at all.
+- The rows of the generated files (`unci_*`) are not in the file: `oracle gen-transforms <out-dir> <known.tsv>` writes them next to the files, from the geometry alone, with the libheif rules (4:2:0: rotate 90 with odd width, rotate 270 with odd height, rotate 180 and mirror with an odd width or height, crop with odd left or top; 4:2:2: rotate 90 and 270 always, rotate 180 with odd height, mirror left/right with odd width, crop with odd left), and `transform.sh` adds them. The rows are a first-principles prediction: the first CI run decides which are real, and corpus rows go in the committed file.
+- Coverage: at least `TRANSFORM_MIN_IMAGES` (default 200) images compared.
+
+**Inputs.** The HEIF/AVIF corpus of corpus.toml (no `mp4-*`), and the generated files: `oracle gen-transforms` writes about 450 minimal HEIF files with `unci` items (ISO/IEC 23001-17, `uncC` version 0, one tile, component interleave) and no codec: 8-bit with chroma 4:0:0, 4:2:0, 4:2:2 and 4:4:4 at 7x5, 16x12 and 33x18 for each of 22 transform sets (none, `irot` 90/180/270, `imir` both axes, `clap` with even offsets, odd x, odd y, odd x and y, odd size, partly outside left/top and right/bottom, entirely outside right (error) and entirely outside left, clap + irot + imir in MIAF order, irot + imir and imir + irot, rotation then clap); 10, 12 and 16 bits for four of the sets; an alpha `auxl` item with the same transforms, its own transforms, or none while the main image has some; an Apple gain map (`urn:com:apple:photo:2020:aux:hdrgainmap`) `auxl` item with its own transforms. Fractional clap geometry (odd W with even clapW, fractional width, denominators of 3, a negative half offset) on 4:0:0 and 4:4:4, and 4:2:2 rotate 90/270 with row-constant chroma (no known row, chroma compared exactly). Sample values come from an own xorshift, so the files are identical on every run. No corpus file was rewritten to add transform properties: the unci files cover the subsampled formats libheif decodes without a codec, and the corpus is read as it is, with its own transforms.
+
+The `unci` encoding follows what libheif v1.23.7 reads: 8 and 16 bits fill their bytes (16 bits big-endian), 10 and 12 bits sit in big-endian 16-bit containers (`component_align_size` 2), chroma planes of 4:2:2 and 4:2:0 are stored with `floor(w/2)` columns and `floor(h/2)` rows for 4:2:0, so for an odd size libheif leaves the last chroma column or row zero; both sides start from the same raw planes, so it does not matter for the gate.
+
 ## Corpus statistics
 
 `oracle stats <in-dir> <out.tsv>` writes one line per file: name, boxes, max depth, items,

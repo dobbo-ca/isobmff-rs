@@ -7,6 +7,9 @@
 //! oracle gen <in-dir> <out-dir>                           deterministic mutations of files < 1 MiB
 //! oracle mp4 [--read] <in-dir> <out-dir>                  tracks.txt (MP4/MOV tracks and keyframes; the other side is ffprobe)
 //! oracle stats <in-dir> <out.tsv>                         one line of corpus statistics per file
+//! oracle transform <in-dir> <raw-dir> <out-dir>            apply_transforms on the raw planes of heif-transform-oracle (docs/parity.md)
+//! oracle transform-cmp <raw> <libheif> <out> <known.tsv> <report-dir>   compare the two result trees
+//! oracle gen-transforms <out-dir> <known.tsv>             deterministic HEIF files with unci items for the transform oracle
 //! ```
 //!
 //! Every regular file below `<in-dir>` is read (name = relative path with `/` replaced by `__`).
@@ -23,6 +26,11 @@ use isobmff::{
     GainMapMetadata, GainMapSource, Heif, Image, ImageKind, ItemError, Limits, Movie, PropValue,
     Track, Transform,
 };
+#[path = "oracle/gen_transforms.rs"]
+mod gen_transforms;
+#[path = "oracle/transform.rs"]
+mod transform;
+
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
@@ -38,7 +46,7 @@ const NOT_METADATA: [&[u8; 4]; 13] = [
 
 fn usage() -> ! {
     eprintln!(
-        "usage: oracle heif [--threads N] [--read] <in-dir> <out-dir>\n       oracle avif [--threads N] <in-dir> <out-dir>\n       oracle mp4 [--read] <in-dir> <out-dir>\n       oracle gen <in-dir> <out-dir>\n       oracle stats <in-dir> <out.tsv>"
+        "usage: oracle heif [--threads N] [--read] <in-dir> <out-dir>\n       oracle avif [--threads N] <in-dir> <out-dir>\n       oracle mp4 [--read] <in-dir> <out-dir>\n       oracle gen <in-dir> <out-dir>\n       oracle stats <in-dir> <out.tsv>\n       oracle transform <in-dir> <raw-dir> <out-dir>\n       oracle transform-cmp <raw> <libheif> <out> <known.tsv> <report-dir>\n       oracle gen-transforms <out-dir> <known.tsv>"
     );
     std::process::exit(2)
 }
@@ -1422,6 +1430,9 @@ fn main() {
         Some((c, rest)) if c == "mp4" => run_mp4(rest),
         Some((c, rest)) if c == "gen" => run_gen(rest),
         Some((c, rest)) if c == "stats" => run_stats(rest),
+        Some((c, rest)) if c == "transform" => transform::run_transform(rest),
+        Some((c, rest)) if c == "transform-cmp" => transform::run_cmp(rest),
+        Some((c, rest)) if c == "gen-transforms" => gen_transforms::run_gen(rest),
         _ => usage(),
     }
 }

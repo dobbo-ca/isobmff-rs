@@ -26,7 +26,7 @@ jobs:
         env:
           ONLY: ${{ inputs.only }}
         run: |
-          all="parse read boxes iloc iinf iref ipma ipco derived tmap movie movie_read mini"
+          all="parse read boxes iloc iinf iref ipma ipco derived tmap movie movie_read mini transform"
           case "$ONLY" in
             '') list=$all ;;
             *) case " $all " in *" $ONLY "*) list=$ONLY ;; *) echo "unknown target $ONLY" >&2; exit 1 ;; esac ;;

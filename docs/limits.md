@@ -50,6 +50,15 @@ before they happen (`Budget::vec`).
   checked at each window refill and every 4096 samples. Parsing sums each `trun` once, checking the
   cancel flag every 4096 records.
 
+## Transforms
+
+`apply_transforms` (docs/transforms.md) charges every new plane buffer to `max_alloc` before it is
+allocated: a crop charges the cropped planes, a rotation by 90 or 270 charges all rotated planes
+(4:2:2 becomes three full planes). The buffer a step replaces is given back after that step, so the
+peak is the planes of two consecutive steps; mirrors and rotation by 180 work in place and charge
+nothing. The planes the caller passes in are not charged. `max_pixels` is checked against the output
+size before any work. The cancel flag is checked between steps and at least every 64 rows.
+
 ## Compared with libheif
 
 libheif's per-box caps (100 children per box, 32 extents per item, 1000 references per iref box)

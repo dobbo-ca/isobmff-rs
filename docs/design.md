@@ -48,6 +48,7 @@ src/
     image.rs    ispe pixi pasp irot imir clap colr auxC lsel a1op a1lx
     config.rs   hvcC av1C (parsed header + raw range)
   derived.rs    grid, iovl, tmap payload parsers
+  transform.rs  apply_transforms: clap, irot, imir on decoded planes (docs/transforms.md)
   mini.rs       the `mini` box (low-overhead HEIF/AVIF): bit header -> the same `Meta` as `meta`
   graph.rs      Image, ImageKind, Transform, Aux, GainMap, the item graph API
   metadata.rs   Exif / XMP item extraction
@@ -297,9 +298,8 @@ Descriptive properties after a transformative one are kept (libavif does the sam
   horizOff and y = (H - clapH)/2 + vertOff integer and >= 0, and the rectangle inside W x H;
   else `None`. Compute in i128, so no input overflows.
 - `Image::display_size() -> Option<(u32, u32)>`: start at ispe; apply each transform in order:
-  clap with a `Some` crop sets the size to the crop size, a `None` crop leaves it (libheif then
-  rounds; such files are listed in tests/parity/known-differences.tsv); irot 90 or 270 swaps;
-  imir keeps. `None` when the image has no ispe. The parity oracle compares this with libheif
+  clap with a `Some` `Clap::crop_rounded` rectangle (the rule of `apply_transforms`, docs/transforms.md) sets the size to the crop size, a `None` one leaves it (such files are in
+  tests/parity/known-differences.tsv if libheif disagrees); irot 90 or 270 swaps; imir keeps. `None` when the image has no ispe. The parity oracle compares this with libheif
   `heif_image_handle_get_width/height`.
 
 
@@ -626,7 +626,7 @@ Result<(), Error>` on a raw payload (a cancel flag that is never set is made ins
 The fuzz crate (tests/fuzz) has the targets `parse` (whole file + every graph call + metadata),
 `read` (`read` over a `Cursor` equals `parse`), `boxes`, `iloc`, `iinf`, `iref`, `ipma`, `ipco`,
 `derived` (grid + iovl), `tmap`, `mini`, `movie` (whole file: `parse_movie` and every walk of every track),
-`movie_read` (`read_movie` over a `Cursor` equals `parse_movie`, same first samples). A target's input is
+`movie_read` (`read_movie` over a `Cursor` equals `parse_movie`, same first samples), `transform` (`apply_transforms` on small random planes; the output size equals `transformed_size`). A target's input is
 the payload as is, except `parse`, `read`, `movie` and `movie_read`, which take a whole file.
 
 ## Oracles and parity
