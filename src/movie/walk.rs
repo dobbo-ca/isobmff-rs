@@ -233,19 +233,26 @@ impl<'a> Stss<'a> {
         }
     }
 
-    /// The next listed sample number; entries must be at least 1 and strictly increasing.
+    /// The next listed sample number; entries must be at least 1 and increasing. An entry equal
+    /// to the one before it is skipped: the FFC `*_hvc1.mp4` files list `1, 1`, which ffmpeg
+    /// reads without complaint (mov.c `mov_read_stss`).
     fn next_entry<R: Read + Seek>(&mut self, r: &mut R) -> Result<Option<u64>, Error> {
-        if self.idx >= self.count {
-            return Ok(None);
+        loop {
+            if self.idx >= self.count {
+                return Ok(None);
+            }
+            let v = u64::from(self.win.u32_at(r, at(self.idx, 4, "stss")?)?);
+            self.idx = self.idx.saturating_add(1);
+            if v == 0 || v < self.prev {
+                return Err(Error::Malformed("stss"));
+            }
+            if v == self.prev {
+                continue;
+            }
+            self.prev = v;
+            self.head = Some(v);
+            return Ok(Some(v));
         }
-        let v = u64::from(self.win.u32_at(r, at(self.idx, 4, "stss")?)?);
-        if v == 0 || v <= self.prev {
-            return Err(Error::Malformed("stss"));
-        }
-        self.prev = v;
-        self.idx = self.idx.saturating_add(1);
-        self.head = Some(v);
-        Ok(Some(v))
     }
 
     /// True when sample `n` is listed (`n` does not decrease between calls).

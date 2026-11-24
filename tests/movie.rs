@@ -175,8 +175,14 @@ fn sync_flags() {
     assert!(samples(&m.tracks[0], &f).iter().all(|s| !s.sync));
     assert!(sync(&m.tracks[0], &f, 4).unwrap().is_empty());
     assert_eq!(at(&m.tracks[0], &f, 0), None);
-    // Entries: 0, not increasing, equal.
-    for bad in [stss(&[0, 2]), stss(&[3, 2]), stss(&[2, 2])] {
+    // An equal entry is skipped (the FFC hvc1 files list 1, 1).
+    let f = tables(stss(&[1, 1]));
+    let m = parse(&f);
+    let flags: Vec<bool> = samples(&m.tracks[0], &f).iter().map(|s| s.sync).collect();
+    assert_eq!(flags, [true, false, false, false]);
+    assert_eq!(sync(&m.tracks[0], &f, 4).unwrap().len(), 1);
+    // Entries: 0, decreasing.
+    for bad in [stss(&[0, 2]), stss(&[3, 2])] {
         let f = tables(bad);
         let m = parse(&f);
         assert_eq!(

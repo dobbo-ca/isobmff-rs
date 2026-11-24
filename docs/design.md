@@ -529,7 +529,7 @@ Tables are not decoded into Vecs. At parse time each table's FullBox version and
 - **cto.** It comes from the `ctts` runs. Both versions are read as **signed i32**, as ffmpeg and gpac do; this is a deliberate deviation from ISO 14496-12 for v0. Samples past the end of `ctts` get 0.
 - **sync.**
   - No `stss`: every sample is a sync sample.
-  - `stss` present: a sample is sync when its number is listed. Entries must be at least 1 and strictly increasing, else `Malformed("stss")` (met when the walk reads that entry). Entries past `sample_count` are ignored.
+  - `stss` present: a sample is sync when its number is listed. Entries must be at least 1 and not decrease (an entry equal to the one before it is skipped, as ffmpeg does), else `Malformed("stss")` (met when the walk reads that entry). Entries past `sample_count` are ignored.
   - An empty `stss` means no sync samples.
   - `stps`, `sdtp` and `sbgp 'rap '` are kept raw and do not set `sync`.
 - **sync_samples(n).** Walks `stss` and skips to each listed sample, or takes samples 1..n when there is no `stss`; then the fragment samples that are sync. The Vec is charged as it grows (doubling). With no `stss` the scan stops with `Malformed("stsz")` at a sample number above the file length (overlapping samples), and the fragment loop stops with `Malformed("trun")` likewise.
