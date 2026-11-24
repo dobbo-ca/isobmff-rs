@@ -1123,9 +1123,9 @@ fn moov_samples_continue_into_fragments() {
         ],
     );
     let m = moov(&[t.build()], &[bx(b"mvex", &trex(1, 1, 10, 8, 0))]);
-    let at = (ftyp.len() + mdat.len() + m.len()) as u64;
+    let moof_at = (ftyp.len() + mdat.len() + m.len()) as u64;
     // The fragment data are 3 samples of 8 bytes at 300, before the moof: a negative data_offset.
-    let off = (300 - at as i64) as i32 as u32;
+    let off = (300 - moof_at as i64) as i32 as u32;
     let frag = moof(&[traf(&[
         tfhd(1, 0x2_0000, &[]),
         trun(0, 0x1 | 0x400, 3, &[off], &[0x10000, 0, 0x10000]),
