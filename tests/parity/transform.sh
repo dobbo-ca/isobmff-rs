@@ -7,14 +7,17 @@
 #                                 `status` (0 only when the gate passed)
 # Binaries on PATH: heif-transform-oracle (tests/parity/c/transform_oracle.c) and isobmff-oracle
 # (examples/oracle.rs). The corpus is the BuildKit cache mount of fetch.sh at /data, as in run.sh.
-# Environment: TRANSFORM_MIN_IMAGES (default 200): the least number of images libheif decodes and
-# isobmff-rs transforms, so a decoder that did not work fails the gate instead of shrinking it.
+# Environment: TRANSFORM_MIN_CORPUS (default 550) and TRANSFORM_MIN_GENERATED (default 400): the least
+# number of corpus images and of generated images libheif decodes and isobmff-rs transforms, so a
+# decoder that did not work (for example no HEVC: the corpus contributes 0) fails the gate instead of
+# shrinking it. Run 4: 1090 images compared, about 630 of them corpus files and 460 generated.
 set -u
 export LC_ALL=C
 W=/work-tr
 D=${DATA:-/data}
 LIST=${DATA_LIST:-/data.list}
-MIN=${TRANSFORM_MIN_IMAGES:-200}
+MIN_CORPUS=${TRANSFORM_MIN_CORPUS:-550}
+MIN_GEN=${TRANSFORM_MIN_GENERATED:-400}
 KNOWN=tests/parity/transform-known-differences.tsv
 tab=$(printf '\t')
 
@@ -75,8 +78,10 @@ full() {
   isobmff-oracle transform $W/in $W/raw $W/rs 2> $W/rs.err || bad=1
   isobmff-oracle transform-cmp $W/raw $W/exp $W/rs $W/known.tsv tests/parity/known-differences.tsv $W/rep || bad=1
 
-  images=$(cat $W/rep/transform-images 2>/dev/null || echo 0)
-  [ "$images" -ge "$MIN" ] || echo "only $images images compared, want at least $MIN" > $W/d-cover
+  corpus_images=$(cat $W/rep/transform-images-corpus 2>/dev/null || echo 0)
+  gen_images=$(cat $W/rep/transform-images-generated 2>/dev/null || echo 0)
+  [ "$corpus_images" -ge "$MIN_CORPUS" ] || echo "only $corpus_images corpus images compared, want at least $MIN_CORPUS" > $W/d-cover-corpus
+  [ "$gen_images" -ge "$MIN_GEN" ] || echo "only $gen_images generated images compared, want at least $MIN_GEN" > $W/d-cover-gen
   {
     echo "## isobmff-rs transform parity"; echo
     echo "| input set | count |"; echo "|---|---|"
@@ -87,7 +92,8 @@ full() {
     echo; echo "| gate | result |"; echo "|---|---|"
   } > "$REP/summary.md"
   gate "6 transform: libheif vs isobmff-rs apply_transforms" $W/rep/transform.diff
-  gate "6 coverage: images compared >= $MIN" $W/d-cover
+  gate "6 coverage: corpus images compared >= $MIN_CORPUS" $W/d-cover-corpus
+  gate "6 coverage: generated images compared >= $MIN_GEN" $W/d-cover-gen
   [ ! -s $W/rep/transform.diff ] || {
     { echo; echo "first 100 diff lines (file, image id, reason):"; echo; head -n 100 $W/rep/transform.diff | sed 's/^/    /'; } >> "$REP/summary.md"
     head -n 5000 $W/rep/transform.diff > "$REP/transform.diff"

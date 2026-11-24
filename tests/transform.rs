@@ -1,5 +1,5 @@
 //! `apply_transforms`: the `max_alloc` ledger (the peak of buffers alive at once), `max_pixels`,
-//! the cancel flag, and `transformed_size` against `Image::display_size`.
+//! the cancel flag, and `transformed_size` against the `apply_transforms` output.
 
 use std::sync::atomic::AtomicBool;
 
@@ -8,6 +8,9 @@ use isobmff::{
     Axis, Chroma, Clap, Error, Limit, Limits, Plane, Planes, Transform, apply_transforms,
     transformed_size,
 };
+
+/// The plane list is charged too: `size_of::<Plane>()` per plane of each new step.
+const PL: usize = size_of::<Plane>();
 
 fn plane(width: u32, height: u32, wide: bool) -> Plane {
     let n = (width * height) as usize;
@@ -79,14 +82,18 @@ fn centre_clap() -> Clap {
 #[test]
 fn a_rotation_charges_its_new_planes() {
     let rot = [Transform::Rotate(90)];
-    assert_peak(planes(Chroma::Yuv420, false), &rot, 3072 + 2 * 768);
-    assert_peak(planes(Chroma::Yuv420, true), &rot, 2 * (3072 + 2 * 768));
+    assert_peak(planes(Chroma::Yuv420, false), &rot, 3072 + 2 * 768 + 3 * PL);
+    assert_peak(
+        planes(Chroma::Yuv420, true),
+        &rot,
+        2 * (3072 + 2 * 768) + 3 * PL,
+    );
     // 4:2:2 chroma becomes 4:4:4: three full planes.
-    assert_peak(planes(Chroma::Yuv422, false), &rot, 3 * 3072);
+    assert_peak(planes(Chroma::Yuv422, false), &rot, 3 * 3072 + 3 * PL);
     assert_peak(
         planes(Chroma::Yuv444, false),
         &[Transform::Rotate(270)],
-        3 * 3072,
+        3 * 3072 + 3 * PL,
     );
 }
 
@@ -107,7 +114,11 @@ fn mirrors_and_180_work_in_place() {
 #[test]
 fn a_crop_charges_the_cropped_planes() {
     let t = [Transform::Clap(centre_clap())];
-    assert_peak(planes(Chroma::Yuv420, false), &t, 32 * 24 + 2 * 16 * 12);
+    assert_peak(
+        planes(Chroma::Yuv420, false),
+        &t,
+        32 * 24 + 2 * 16 * 12 + 3 * PL,
+    );
 }
 
 #[test]
@@ -115,19 +126,31 @@ fn a_replaced_buffer_is_given_back_after_the_next_step() {
     let rot = Transform::Rotate(90);
     let c = Transform::Clap(centre_clap());
     // The second rotation holds the first result and its own output: twice the planes.
-    assert_peak(planes(Chroma::Yuv420, false), &[rot, rot], 2 * 4608);
+    assert_peak(
+        planes(Chroma::Yuv420, false),
+        &[rot, rot],
+        2 * (4608 + 3 * PL),
+    );
     // Three rotations: the first is released before the third is charged, so the peak stays.
-    assert_peak(planes(Chroma::Yuv420, false), &[rot, rot, rot], 2 * 4608);
+    assert_peak(
+        planes(Chroma::Yuv420, false),
+        &[rot, rot, rot],
+        2 * (4608 + 3 * PL),
+    );
     // An in-place step keeps what the rotation charged.
     assert_peak(
         planes(Chroma::Yuv420, false),
         &[rot, Transform::Mirror(Axis::LeftRight)],
-        4608,
+        4608 + 3 * PL,
     );
     // Rotate, then crop 32 x 24 out of 48 x 64: the rotation (4608) and the crop (1152) coexist.
-    assert_peak(planes(Chroma::Yuv420, false), &[rot, c], 4608 + 1152);
+    assert_peak(
+        planes(Chroma::Yuv420, false),
+        &[rot, c],
+        4608 + 1152 + 6 * PL,
+    );
     // Crop, then rotate the small image: the crop (1152) and its rotation (1152).
-    assert_peak(planes(Chroma::Yuv420, false), &[c, rot], 2 * 1152);
+    assert_peak(planes(Chroma::Yuv420, false), &[c, rot], 2 * 1152 + 6 * PL);
 }
 
 #[test]
@@ -142,9 +165,26 @@ fn pixels_and_cancel() {
         apply_transforms(planes(Chroma::Yuv420, false), &rot, &l, &c),
         Err(Error::LimitExceeded(Limit::Pixels))
     );
-    // The crop output is what counts, not the input.
+    // The input counts too, even when the crop output fits.
     let l = Limits {
         max_pixels: 768,
+        ..limits(1 << 30)
+    };
+    assert_eq!(
+        apply_transforms(
+            planes(Chroma::Yuv420, false),
+            &[Transform::Clap(centre_clap())],
+            &l,
+            &c
+        ),
+        Err(Error::LimitExceeded(Limit::Pixels))
+    );
+    assert_eq!(
+        transformed_size(64, 48, &[Transform::Clap(centre_clap())], &l),
+        Err(Error::LimitExceeded(Limit::Pixels))
+    );
+    let l = Limits {
+        max_pixels: 3072,
         ..limits(1 << 30)
     };
     assert!(
@@ -170,7 +210,7 @@ fn transformed_size_follows_the_list() {
         Transform::Rotate(270),
         Transform::Mirror(Axis::TopBottom),
     ];
-    assert_eq!(transformed_size(64, 48, &t), Ok((24, 32)));
+    assert_eq!(transformed_size(64, 48, &t, &limits(0)), Ok((24, 32)));
     let out = apply_transforms(
         planes(Chroma::Yuv420, false),
         &t,

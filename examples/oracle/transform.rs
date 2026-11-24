@@ -4,7 +4,8 @@
 //! wrote (`<raw-dir>/<name>/<id>.planes`, no transforms applied), applies the transforms of item
 //! `<id>` with `isobmff::apply_transforms` and writes `<out-dir>/<name>/<id>.planes` (or `.err`).
 //! An alpha plane (the plane after the luma and chroma planes) takes the transforms of the alpha
-//! item, as libheif decodes the alpha item on its own, not those of the main image. Without an
+//! item, applied at the alpha item's own size (its raw planes, when the C oracle wrote them) and
+//! then scaled to the main size, as libheif does, not those of the main image. Without an
 //! alpha item (a grid with alpha in the tiles) it takes the transforms of the main image.
 //!
 //! `transform-cmp <raw-dir> <libheif-dir> <out-dir> <known.tsv> <graph-known.tsv> <report-dir>`
@@ -12,7 +13,7 @@
 
 use super::{files, limits, opts, usage};
 use isobmff::{
-    Chroma, Heif, Image, ImageKind, Limits, Plane, PlaneSamples as Samples, Planes,
+    Chroma, Heif, Image, ImageKind, Limits, Plane, PlaneSamples as Samples, Planes, Transform,
     apply_transforms,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -236,6 +237,7 @@ fn transform_one(
     h: &Heif,
     id: u32,
     raw: &[u8],
+    rd: &Path,
     lim: &Limits,
     cancel: &AtomicBool,
 ) -> Result<Vec<u8>, &'static str> {
@@ -257,15 +259,35 @@ fn transform_one(
         Some(aid) if planes.planes.len() == n_main + 1 => planes.planes.pop().map(|a| (a, aid)),
         _ => None,
     };
+    let in_chroma = planes.chroma;
     let mut res = apply_transforms(planes, &img.transforms, lim, cancel).map_err(|e| token(&e))?;
+    // Chroma is kept, except 4:2:2 turned by 90 or 270, which becomes 4:4:4.
+    let turned = img
+        .transforms
+        .iter()
+        .any(|t| matches!(t, Transform::Rotate(90 | 270)));
+    if res.chroma != in_chroma
+        && !(in_chroma == Chroma::Yuv422 && res.chroma == Chroma::Yuv444 && turned)
+    {
+        return Err("chroma");
+    }
     if let Some((a, aid)) = alpha {
+        // libheif decodes the alpha item on its own: its transforms apply at its own size, then
+        // the result is scaled to the size of the main image (image_item.cc:1506-1541). So take
+        // the alpha item's own raw planes (written by the C oracle's aux decode) and transform
+        // first, scale after. Without them (the aux decode failed), fall back to the plane that
+        // the main decode scaled already: exact for an alpha item of the main image's size.
+        let own = fs::read(rd.join(format!("{aid}.planes")))
+            .ok()
+            .and_then(|b| parse_planes(&b).and_then(|p| to_planes(&p)))
+            .filter(|p| p.chroma == Chroma::Mono && p.planes.len() == 1);
         let atr = h.image(aid).map_err(|_| "alpha")?.transforms;
-        let ap = Planes {
+        let ap = own.unwrap_or(Planes {
             width: a.width,
             height: a.height,
             chroma: Chroma::Mono,
             planes: vec![a],
-        };
+        });
         let ap = apply_transforms(ap, &atr, lim, cancel).map_err(|e| token(&e))?;
         let a = ap.planes.into_iter().next().ok_or("alpha")?;
         let a = if a.width == res.width && a.height == res.height {
@@ -309,7 +331,7 @@ pub fn run_transform(args: &[String]) {
             .and_then(|d| isobmff::parse(&d, &lim, &cancel).ok());
         for id in ids {
             let res = match (&heif, fs::read(rd.join(format!("{id}.planes")))) {
-                (Some(h), Ok(raw)) => transform_one(h, id, &raw, &lim, &cancel),
+                (Some(h), Ok(raw)) => transform_one(h, id, &raw, &rd, &lim, &cancel),
                 (None, _) => Err("parse"),
                 (_, Err(_)) => Err("raw"),
             };
@@ -331,6 +353,8 @@ struct Counts {
     rejected: u32,
     derived: u32,
     images: u32,
+    /// Of `images`, the generated files (`unci_*`).
+    images_gen: u32,
     planes: u32,
     exact: u32,
     known: u32,
@@ -415,6 +439,27 @@ fn compare(a: &Parsed, b: &Parsed, raw: &Parsed, known: bool, rgb: bool) -> Resu
         }
         if (a.w, a.h) != (b.w, b.h) || a.planes.len() != b.planes.len() {
             return Err("size or plane count".into());
+        }
+        // isobmff-rs keeps the chroma format, except 4:2:2 turned by 90 or 270, which is 4:4:4
+        if b.chroma != raw.chroma && !(raw.chroma == "422" && b.chroma == "444") {
+            return Err(format!(
+                "isobmff-rs chroma {} for {} input",
+                b.chroma, raw.chroma
+            ));
+        }
+        let (sx, sy) = match b.chroma {
+            "420" => (2, 2),
+            "422" => (2, 1),
+            _ => (1, 1),
+        };
+        for k in [1, 2] {
+            let want = (b.w.div_ceil(sx), b.h.div_ceil(sy));
+            if b.planes.get(k).map(|p| (p.w, p.h)) != Some(want) {
+                return Err(format!(
+                    "isobmff-rs chroma plane {k} is not {}x{} for {}",
+                    want.0, want.1, b.chroma
+                ));
+            }
         }
         let mut n = 0;
         for (k, (x, y)) in a.planes.iter().zip(&b.planes).enumerate() {
@@ -568,6 +613,9 @@ pub fn run_cmp(args: &[String]) {
                 continue;
             }
             c.images += 1;
+            if name.starts_with("unci_") {
+                c.images_gen += 1;
+            }
             let is_known = known.get_mut(&(name.clone(), id)).is_some_and(|u| {
                 *u = true;
                 true
@@ -627,11 +675,11 @@ pub fn run_cmp(args: &[String]) {
         }
     }
     let t = format!(
-        "| transform: files libheif read / files with a decoded image | {} / {} |\n\
+        "| transform: input files (directories libheif was run on) / files with a decoded image | {} / {} |\n\
          | transform: images libheif cannot decode or write as planes (not compared) | {} |\n\
          | transform: files isobmff-rs rejects (graph known difference) (not compared) | {} |\n\
          | transform: derived images whose inputs have transforms (not compared) | {} |\n\
-         | transform: images compared | {} |\n\
+         | transform: images compared (corpus / generated) | {} ({} / {}) |\n\
          | transform: planes compared | {} |\n\
          | transform: exact matches (planes or the same error) | {} |\n\
          | transform: known differences (libheif-444: luma and alpha exact, chroma skipped; libheif-444-rgb: luma range-rescaled within 2) | {} |\n\
@@ -642,6 +690,8 @@ pub fn run_cmp(args: &[String]) {
         c.rejected,
         c.derived,
         c.images,
+        c.images - c.images_gen,
+        c.images_gen,
         c.planes,
         c.exact,
         c.known,
@@ -650,9 +700,11 @@ pub fn run_cmp(args: &[String]) {
     fs::create_dir_all(rep).unwrap();
     fs::write(Path::new(rep).join("transform-counts.md"), t).unwrap();
     fs::write(Path::new(rep).join("transform.diff"), diff).unwrap();
-    fs::write(
-        Path::new(rep).join("transform-images"),
-        format!("{}\n", c.images),
-    )
-    .unwrap();
+    // the coverage floors of transform.sh: corpus images and generated images apart
+    for (f, n) in [
+        ("transform-images-corpus", c.images - c.images_gen),
+        ("transform-images-generated", c.images_gen),
+    ] {
+        fs::write(Path::new(rep).join(f), format!("{n}\n")).unwrap();
+    }
 }

@@ -2,7 +2,9 @@
 use std::sync::atomic::AtomicBool;
 
 use isobmff::transform::Samples;
-use isobmff::{Axis, Chroma, Clap, Plane, Planes, Transform, apply_transforms, transformed_size};
+use isobmff::{
+    Axis, Chroma, Clap, Error, Limits, Plane, Planes, Transform, apply_transforms, transformed_size,
+};
 use libfuzzer_sys::fuzz_target;
 
 #[path = "../common.rs"]
@@ -68,13 +70,40 @@ fn clap(r: &mut Rd<'_>) -> Clap {
     }
 }
 
-// data = chroma, sizes (<= 64 x 64), extra planes, up to 6 transforms, then sample bytes.
+/// Two bytes in 1..=160, so a plane spans several 64 x 64 rotation tiles.
+fn side(r: &mut Rd<'_>) -> u32 {
+    u32::from(u16::from_le_bytes([r.u8(), r.u8()]) % 160) + 1
+}
+
+fn samples_len(s: &Samples) -> usize {
+    match s {
+        Samples::U8(v) => v.len(),
+        Samples::U16(v) => v.len(),
+    }
+}
+
+fn run(input: &Planes, t: &[Transform], l: &Limits, c: &AtomicBool) -> Result<Planes, Error> {
+    apply_transforms(input.clone(), t, l, c)
+}
+
+// data = chroma, sizes (<= 160 x 160), extra planes, limits, up to 6 transforms, then sample bytes.
 fuzz_target!(|data: &[u8]| {
     let mut r = Rd(data);
     let chroma =
         [Chroma::Mono, Chroma::Yuv420, Chroma::Yuv422, Chroma::Yuv444][usize::from(r.u8() % 4)];
-    let (w, h) = (u32::from(r.u8() % 64) + 1, u32::from(r.u8() % 64) + 1);
+    let (w, h) = (side(&mut r), side(&mut r));
     let extra = r.u8() % 3;
+    // Generous limits (the target's own, cancel unset) or tiny ones.
+    let generous = r.u8() & 1 == 0;
+    let limits = if generous {
+        common::small_limits()
+    } else {
+        Limits {
+            max_alloc: usize::try_from(r.u32() % (1 << 18)).unwrap_or(0),
+            max_pixels: u64::from(r.u32() % (1 << 15)),
+            ..common::small_limits()
+        }
+    };
     let count = r.u8() % 7;
     let mut transforms = Vec::new();
     for _ in 0..count {
@@ -109,31 +138,47 @@ fuzz_target!(|data: &[u8]| {
         planes,
     };
     let cancel = AtomicBool::new(false);
-    let size = transformed_size(w, h, &transforms);
-    match apply_transforms(input, &transforms, &common::small_limits(), &cancel) {
-        Ok(out) => {
-            assert_eq!(size, Ok((out.width, out.height)));
-            assert_eq!(out.planes.len(), count);
-            for (i, p) in out.planes.iter().enumerate() {
-                let (sx, sy) = match (out.chroma, i) {
-                    (Chroma::Yuv420, 1 | 2) => (2, 2),
-                    (Chroma::Yuv422, 1 | 2) => (2, 1),
-                    _ => (1, 1),
-                };
-                assert_eq!(p.width, out.width.div_ceil(sx));
-                assert_eq!(p.height, out.height.div_ceil(sy));
-                let n = match &p.samples {
-                    Samples::U8(v) => v.len(),
-                    Samples::U16(v) => v.len(),
-                };
-                assert_eq!(n, (p.width * p.height) as usize);
-            }
-        }
-        // The size check comes first, so its error is the error of the call.
+    let size = transformed_size(w, h, &transforms, &limits);
+    // The layout is valid, so an error is the size error or a limit; with generous limits and a
+    // size that is Ok there is none.
+    let out = match run(&input, &transforms, &limits, &cancel) {
+        Ok(out) => out,
         Err(e) => {
-            if let Err(s) = size {
-                assert_eq!(e, s);
+            match &size {
+                Err(s) => assert_eq!(&e, s),
+                Ok(_) => assert!(
+                    !generous && matches!(e, Error::LimitExceeded(_)),
+                    "{e:?} with size {size:?}, generous {generous}"
+                ),
             }
+            return;
+        }
+    };
+    // The empty list returns the input, which the pixel limit does not check.
+    if !transforms.is_empty() {
+        assert_eq!(size, Ok((out.width, out.height)));
+    }
+    assert_eq!(out.planes.len(), count);
+    for (i, p) in out.planes.iter().enumerate() {
+        let (sx, sy) = match (out.chroma, i) {
+            (Chroma::Yuv420, 1 | 2) => (2, 2),
+            (Chroma::Yuv422, 1 | 2) => (2, 1),
+            _ => (1, 1),
+        };
+        assert_eq!(p.width, out.width.div_ceil(sx));
+        assert_eq!(p.height, out.height.div_ceil(sy));
+        assert_eq!(samples_len(&p.samples), (p.width * p.height) as usize);
+    }
+    // Rotations and mirrors only: four quarter turns (not 4:2:2, which becomes 4:4:4) and two
+    // mirrors of one axis restore the input.
+    if generous && transforms.iter().all(|t| !matches!(t, Transform::Clap(_))) {
+        let quarter = [Transform::Rotate(90); 4];
+        if chroma != Chroma::Yuv422 {
+            assert_eq!(run(&input, &quarter, &limits, &cancel).as_ref(), Ok(&input));
+        }
+        for axis in [Axis::LeftRight, Axis::TopBottom] {
+            let twice = [Transform::Mirror(axis); 2];
+            assert_eq!(run(&input, &twice, &limits, &cancel).as_ref(), Ok(&input));
         }
     }
 });
