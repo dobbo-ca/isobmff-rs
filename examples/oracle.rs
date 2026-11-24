@@ -930,16 +930,15 @@ fn frma(d: &[u8], e: &isobmff::SampleEntry) -> Option<[u8; 4]> {
 }
 
 /// Whether ffmpeg keeps sample entry `e` after `first` (`mov_skip_multiple_stsd`): its codec tag
-/// is the `frma` format of an `encv`/`enca` first entry, else the kind of `first`; an entry with
+/// is the `frma` format of an `encv` first entry, else the kind of `first`; an entry with
 /// another fourcc is dropped, except for the listed exceptions.
 fn entry_kept(d: &[u8], first: &isobmff::SampleEntry, e: &isobmff::SampleEntry) -> bool {
-    let tag = if matches!(&first.kind.0, b"encv" | b"enca") {
+    let tag = if matches!(&first.kind.0, b"encv") {
         frma(d, first).unwrap_or(first.kind.0)
     } else {
         first.kind.0
     };
-    tag == [0; 4]
-        || tag == e.kind.0
+    tag == e.kind.0
         || matches!(&tag, b"apcn" | b"apch" | b"dvpp" | b"dvcp" | b"jpeg")
         || (&tag == b"AV1x" && &e.kind.0 == b"AVup")
 }

@@ -955,9 +955,8 @@ mod tests {
         );
         assert_eq!(parse_movie(&[], &l, &c).err(), Some(Error::UnknownFormat));
         let two = [bx(b"moov", &[]), bx(b"moov", &[])].concat();
-        assert_eq!(
-            parse_movie(&two, &l, &c).err(),
-            Some(Error::Malformed("moov"))
-        );
+        let m = parse_movie(&two, &l, &c).unwrap();
+        assert_eq!(m.other_boxes.len(), 1);
+        assert_eq!(m.other_boxes[0].0.0, *b"moov");
     }
 }

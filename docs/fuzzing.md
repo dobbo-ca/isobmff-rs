@@ -17,7 +17,7 @@ call `isobmff::__fuzz::*` (hidden, `fn(&[u8], &Limits) -> Result<(), Error>` on 
 | `ipco` | `__fuzz::ipco` | every property parser |
 | `derived` | `__fuzz::grid` and `__fuzz::iovl` | grid and overlay payloads |
 | `tmap` | `__fuzz::tmap` | ISO 21496-1 payload, both layouts |
-| `movie` | `__fuzz::movie` | `parse_movie` on the whole input (`moov` and every `moof`: `trex`, `tfhd`, `tfdt`, `trun`), then for every track a walk of its first 65 536 samples (moov and fragment samples), `sync_samples(4)` and `sync_sample_at` at `i64::MIN`, 0 and `i64::MAX`, over `Cursor::new(data)` (the sync walks stop at a sample number above the input length, so they need no sample-count skip) |
+| `movie` | `__fuzz::movie` | `parse_movie` on the whole input (`moov` and every `moof`: `trex`, `tfhd`, `tfdt`, `trun`), then for every track a walk of its first 65 536 samples (moov and fragment samples), `sync_samples(4)` and `sync_sample_at` at `i64::MIN`, 0 and `i64::MAX`, over `Cursor::new(data)` (the walks stop at a sample number above twice the input length, so they need no sample-count skip) |
 | `movie_read` | `read_movie` over a `Cursor` | equals `parse_movie` (`Ok` and `Err`; each `moof` is copied and parsed in turn), and the first 256 samples of every track are equal |
 | `mini` | `__fuzz::mini` | the bit header and chunks of a `mini` box, then the graph built from it (the `ftyp` minor version is `avif` for an even length, `heic` for an odd one) |
 

@@ -144,7 +144,7 @@ skip <id> <reason>                                                (track not gat
 ```
 
 - **Gated tracks.** Handler `vide` or `pict`. The oracle models ffmpeg's codec tag: the tag of
-  entry 1 is its `frma` original format when its kind is `encv` or `enca`, else its kind.
+  entry 1 is its `frma` original format when its kind is `encv`, else its kind.
   `mov_skip_multiple_stsd` (`mov.c:2524-2548`) drops entry i > 1 when its fourcc differs from the
   tag (except `apcn`, `apch`, `dvpp`, `dvcp`, `jpeg` and `AV1x` with `AVup`, which are kept), and
   ffmpeg then drops the samples that use a dropped entry (`mov.c:4198-4206`). When any later
@@ -268,11 +268,12 @@ the corpus gate says if one still differs):
 5. **MP4/MOV tracks**: `oracle mp4` against ffprobe (`tracks.txt` above) on the corpus, the
    MP4 sources of corpus.toml (`mp4-*`, read by this gate only) and the mutations of both.
    - **5a**: corpus files with a gated track, a walk error or a parse error of class `malformed` or
-     `unsupported` (`error malformed`, `error unsupported`: a file ffprobe reads with packets and
-     no error is a mismatch, so a valid file that parse_movie rejects cannot hide). The classes
+     `unsupported` (`error malformed`, `error unsupported`: a file ffprobe reads with packets (exit
+     0, whatever its stderr says) is a mismatch, so a valid file that parse_movie rejects cannot hide). The classes
      no-moov, truncated, unknown-format and the limit classes are not gated. The parse-error check
      counts every ffprobe packet, whatever the stream, and the corpus of the HEIF/AVIF gates is in
-     this input set; the first CI run with this check needed no `known-differences.tsv` line.
+     this input set; the first run of the exit-code form may need a side-`mp4` line for
+     `j2ki-siz-tile-alloc-oom.heif` (a parse error, and ffprobe may exit 0 with packets).
      Lines of side `mp4` are stale when the file is now identical, as in gate 1.
    - **5b**: mutations that isobmff-rs reads to the end (a sample line and no `e` line) while
      ffprobe exits 0 with nothing on stderr; the others are only counted. Mutations of a file
