@@ -8,6 +8,12 @@
 //! positions are absolute file offsets, so a caller needs only the file; the [`Heif`] holds no
 //! borrow of it. No call panics on any input.
 //!
+//! [`parse_movie`] (a file in memory) and [`read_movie`] (a `Read + Seek`) give a [`Movie`]: the
+//! tracks of an MP4, MOV, 3GP or AVIS file, with the codec configuration of each sample entry
+//! and the sample tables kept as ranges of the file. [`Track::sync_samples`] and
+//! [`Track::sync_sample_at`] give the byte ranges of keyframes for hevc-rs and av1-rs; no sample
+//! is decoded. Movie fragments (`moof`) are not read yet.
+//!
 //! # Example
 //!
 //! ```
@@ -55,7 +61,8 @@
 //!
 //! # Resource limits
 //!
-//! `parse`, `read`, `item_bytes` and `metadata` take [`Limits`] and a cancel flag (`&AtomicBool`); the `Heif` graph accessors work on the already-bounded graph.
+//! `parse`, `read`, `item_bytes`, `metadata`, `parse_movie`, `read_movie` and the sample walks of
+//! [`Track`] take [`Limits`] and a cancel flag (`&AtomicBool`); the `Heif` graph accessors work on the already-bounded graph.
 //!
 //! - `max_alloc` (default 256 MiB) is the enforced peak of the working memory of one call: each
 //!   buffer whose size comes from the input (items, properties, references, extents, the copy of
@@ -65,7 +72,7 @@
 //!   call runs on the calling thread for every value, including 1.
 //! - The structural caps (`max_boxes`, `max_depth`, `max_items`, `max_properties`,
 //!   `max_references`, `max_extents`, `max_grid_tiles`, `max_pixels`, `max_meta_bytes`,
-//!   `max_metadata_bytes`) each give [`Error::LimitExceeded`] with their own [`Limit`]. The
+//!   `max_metadata_bytes`, `max_moov_bytes`) each give [`Error::LimitExceeded`] with their own [`Limit`]. The
 //!   defaults are far above every real phone and camera file.
 //! - Set the cancel flag from another thread to stop a call: it returns [`Error::Cancelled`].
 //!   The flag is checked every 1024 boxes and before each item is read.
@@ -100,6 +107,7 @@ mod graph;
 mod limits;
 mod meta;
 mod metadata;
+mod movie;
 mod props;
 
 pub use boxes::Extent;
@@ -114,6 +122,7 @@ pub use graph::{
 pub use limits::Limits;
 pub use meta::{Association, EntityGroup, Reference};
 pub use metadata::Metadata;
+pub use movie::{Edit, Movie, Sample, SampleEntry, Samples, Track, parse_movie, read_movie};
 pub use props::{Av1c, Axis, Clap, Colour, Hvcc, NalArray, PropValue, Property, Rect};
 
 use boxes::{BoxHeader, Boxes, Ctx, Src, decode_header};
@@ -504,6 +513,28 @@ pub mod __fuzz {
         let budget = Budget::new(limits, &cancel);
         super::ftyp::parse(data, &budget).map(|_| ())
     }
+
+    /// `parse_movie`, then for every track a walk of all samples, `sync_samples(4)` and
+    /// `sync_sample_at` at `i64::MIN`, 0 and `i64::MAX`, all over `Cursor::new(data)`.
+    ///
+    /// # Errors
+    ///
+    /// The error of `parse_movie` (a failing walk is not an error here).
+    pub fn movie(data: &[u8], limits: &Limits) -> Result<(), Error> {
+        let cancel = AtomicBool::new(false);
+        let m = parse_movie(data, limits, &cancel)?;
+        for t in &m.tracks {
+            let walk = t.samples(std::io::Cursor::new(data), limits, &cancel);
+            let _ = walk.take(1 << 16).take_while(Result::is_ok).count();
+            let _ = t.sync_samples(std::io::Cursor::new(data), 4, limits, &cancel);
+            if t.sample_count <= 1 << 16 {
+                for at in [i64::MIN, 0, i64::MAX] {
+                    let _ = t.sync_sample_at(std::io::Cursor::new(data), at, limits, &cancel);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -817,6 +848,7 @@ mod tests {
             let _ = __fuzz::iovl(data, &l);
             let _ = __fuzz::tmap(data, &l);
             let _ = __fuzz::ftyp(data, &l);
+            let _ = __fuzz::movie(data, &l);
         }
     }
 }

@@ -1,12 +1,14 @@
 # Parity with libheif and libavif
 
-isobmff-rs is a new crate with no Go original. Its oracles are libheif and libavif, which run
-only in CI, built from source with no codecs. Neither library is a dependency of the crate.
+isobmff-rs is a new crate with no Go original. Its oracles are libheif and libavif (HEIF, AVIF) and
+ffprobe from ffmpeg (MP4/MOV tracks), which run
+only in CI (libheif and libavif are built from source with no codecs). None of them is a dependency of the crate.
 
 | Oracle | Version | Licence | Use |
 |---|---|---|---|
 | libheif | v1.23.7, commit `12a259a5882dd99d45ec5fc77e296a3b620d1e2e` | LGPL-3.0 (CI tool only, never shipped) | item graph of every file, item bytes, images |
 | libavif | v1.4.2, commit `c5240fc79fe5c2407e10afd35f5505ef6333ea49` | BSD-2-Clause | AVIF primary image: size, depth, alpha, ICC, Exif, XMP, transforms, byte extent, gain map |
+| ffprobe (ffmpeg) | Debian bookworm 5.1.x (`7:5.1.9-0+deb12u1`) | LGPL/GPL (CI tool only, never shipped) | MP4/MOV tracks: byte range, dts, pts and keyframe flag of every sample of a video track, nearest keyframe |
 
 ## Output format (both sides write exactly this)
 
@@ -119,6 +121,70 @@ gainmap-meta <fields>                        only when gainmap 1 (see below)
 - If libavif fails with `AVIF_RESULT_INVALID_EXIF_PAYLOAD`, the oracle parses again with
   `ignoreExif = 1` and writes `exif error`.
 
+### `tracks.txt` (`oracle mp4` and ffprobe)
+
+The MP4/MOV side is different: ffprobe is the oracle and it prints no file of this format, so
+`tests/parity/ffprobe-tracks.sh` and `ffprobe-tracks.awk` turn its packets into the `s` and `at`
+lines below, and `tests/parity/mp4cmp.awk` compares them with `oracle mp4`. One file
+`<out>/<name>/tracks.txt` per input. A parse error is the single line `error <class>`
+(`Error::class()`). Otherwise:
+
+```
+movie timescale=<u32> duration=<u64> tracks=<n> fragmented=<0|1>
+track <id> handler=<4cc> timescale=<u32> samples=<n> entries=<4cc,...> config=<4cc|-> edits=<n>
+s <id> <n> <pos> <size> <dts-dts(first sample)> <pts> <K|_>      (gated tracks only, every sample)
+at <id> <j> <number|none>                                         (gated tracks, j = 0..17)
+e <id> <class>                                                    (walk error; no more s/at lines)
+skip <id> <reason>                                                (track not gated: `avif`, `fragmented`, `handler` or `entry`)
+```
+
+- **Gated tracks.** Handler `vide` or `pict`. A track where any sample has `entry` other than 1 is
+  `skip <id> entry`, because ffmpeg drops those samples (`mov.c:4206`). Other handlers are
+  `skip <id> handler`.
+- **Skipped files.** Two kinds of file are `skip <id> <why>` for every track, whatever its handler,
+  so that no `s` line of any track is compared (`mp4cmp.awk` compares only the ids with an `s` or
+  `e` line in ours, and ignores what ffprobe prints for the others; a file whose tracks are all
+  skipped is not in gate 5 at all, nor in the count of 5d):
+  - `avif`: the major brand of the first `ftyp` is `avif`. ffmpeg then ignores the `trak` boxes and
+    returns the primary `iloc` item as the only packet. Where `meta` precedes `moov`, `iloc` sets
+    found_moov and the real `moov` is skipped as a duplicate (`mov.c:1147`, `1178-1183`,
+    `7523-7640`); where `moov` comes first the header read fails (`4470`). So
+    ffprobe shows a still image where isobmff-rs shows the tracks of the sequence. Exact rule
+    (`strncmp(type, "avif", 4)`).
+  - `fragmented`: the file has a top-level `moof`. ffprobe reads the
+    fragments, isobmff-rs does not yet. PR D (fragments) removes this skip.
+- `s`: `pos` and `size` are the file range of the sample, `dts` is rebased to the first sample (ffmpeg
+  shifts it by a per-stream amount), `pts = dts + cto` of the raw tables, `K` is `Sample::sync`.
+- **Probes.** Let `m = 1 + floor((count - 1) * floor(j / 2) / 8)` for j = 0..17. Probe `t_j` is
+  `pts(m) - 1` for even j and `pts(m)` for odd j. Each `at` line is `Track::sync_sample_at(t_j)` on
+  our side. On the ffprobe side the awk script takes, among the packets with `K`, the greatest
+  `pts <= t_j` (the lowest number among equals), else the first `K` packet, else `none`.
+- **Masks.** The oracle prints `-` in a field that ffmpeg computes differently, deciding from the
+  raw bytes of `Track::tables` and `Track::other_boxes`. `mp4cmp.awk` skips a field that is `-`.
+
+  | Mask (`-`) | When |
+  |---|---|
+  | `K` and every `at` | the whole track, when there is an empty `stss`, a `stps`, or an `sbgp` with grouping_type `rap ` (ffmpeg's K comes from those too: `mov.c:4167-4188`) |
+  | `pts` and every `at` | a track whose `ctts` has a count of 0 or >= 2^31, an entry with offset magnitude above 2^28, or a total below `sample_count` (`mov.c:3158-3183`, `8842-8856`; the oracle masks every entry, ffmpeg only the ones before the last two) |
+  | `dts` and `pts` | a track with any `stts` delta above `0xFFF8ACFF` (ffmpeg clips it: `mov.c:3039-3047`, `9144`) |
+
+- **Why the fields are comparable.** ffmpeg sets index dts to `raw - dts_shift` (`mov.c:4102`) and pts
+  to `dts + dts_shift + ctts` (`mov.c:8842`), so pts equals our `dts + cto` exactly. dts is compared
+  after rebasing to the first sample. `-ignore_editlist 1` stops `elst` from being read at all
+  (`mov.c:5513`, `4337`), so no edit list is applied on either side.
+- **ffprobe.** `ffprobe -v error -ignore_editlist 1 -ignore_chapters 1 -use_mfra_for auto
+  -use_tfdt 1 -fflags +noparse+nofillin` with `-show_entries packet=stream_index,pts,dts,size,pos,flags`
+  (and `stream=index,id` for the track ids), `-of csv=p=0`. The awk scripts run with `gawk -M`, so
+  that 64-bit timestamps stay exact. A stream with side data (a non-identity `tkhd` matrix, a `pssh`)
+  makes ffprobe print an extra csv row without index and id; the scripts drop such rows. ffprobe's csv writer
+  (ffprobe.c `compact_print_section_header`/`footer`) ends such a row with a separator and adds one empty row per side-data element. ffmpeg is Debian bookworm `7:5.1.9-0+deb12u1` when the archive
+  still has it, else the current bookworm ffmpeg; `summary.md` prints the version.
+- **Comparison** (`gawk -M -v fferr=0|1 -f tests/parity/mp4cmp.awk <ours> <ffprobe>`; `fferr` is 1
+  when ffprobe exits non-zero or prints on stderr). Lines are keyed by (kind, id, n or j). Only ids
+  with an `s` or `e` line in ours are compared. Fields 4 and up must be equal unless ours is `-`. A
+  key on one side only is a mismatch. The exception: for an id where ours has an `e` line, or when
+  `fferr` is 1, only keys on both sides are compared and `at` lines are skipped.
+
 ## Gates (tests/parity/run.sh)
 
 1. **Corpus**: every corpus file through `heif_oracle` and `oracle heif`; AVIF files also through
@@ -134,6 +200,23 @@ gainmap-meta <fields>                        only when gainmap 1 (see below)
    (the `Read + Seek` path, item bytes read through the reader) equals the slice path.
 4. **Coverage**: the run fails when the corpus has fewer files than `PARITY_MIN_INPUTS`, so a
    missing mount does not shrink the gate.
+5. **MP4/MOV tracks**: `oracle mp4` against ffprobe (`tracks.txt` above) on the corpus, the
+   MP4 sources of corpus.toml (`mp4-*`, read by this gate only) and the mutations of both.
+   - **5a**: corpus files with a gated track (or a walk error), with `known-differences.tsv` lines
+     of side `mp4` (a stale line fails, as in gate 1).
+   - **5b**: mutations that isobmff-rs reads to the end (a sample line and no `e` line) while
+     ffprobe exits 0 with nothing on stderr; the others are only counted. Mutations of a file
+     listed for side `mp4` are not diffed.
+   - **5c**: `oracle mp4 --read` (`read_movie`, walks through a `File`) equals the slice path.
+   - **5d**: at least `PARITY_MIN_MP4` (default 100) corpus files have a gated track; `summary.md`
+     prints the count, so the default can be raised to the first green run.
+   The mismatches are `mp4.diff` (5a) and `mp4-mut.diff` (5b). Expected known differences, to list
+   rather than mask once a run shows them: external `url ` drefs (ours `Unsupported`, ffmpeg reads
+   the main file, so only the samples before ours stops are compared), several `trun` boxes
+   without data_offset and fragments with `sidx` but no `tfdt` (ffmpeg takes the sidx time; both are
+   fragments, next step), `cmov`. Listed so far (side `mp4`): a file with a track whose samples lie
+   past the end of the file (ffmpeg interleaves the tracks and stops reading at the first sample it
+   cannot read, `mov.c:8589-8613`, `8801`): `maf/vsaf/1.mp4`.
 
 `summary.md` lists the counts, the corpus maxima (items, references per box, grid tiles, extents
 per item, boxes, depth) that docs/limits.md cites, and the first 200 diff lines.

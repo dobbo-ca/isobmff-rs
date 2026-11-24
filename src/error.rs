@@ -25,6 +25,8 @@ pub enum Limit {
     MetaBytes,
     /// [`Limits::max_metadata_bytes`](crate::Limits::max_metadata_bytes).
     MetadataBytes,
+    /// [`Limits::max_moov_bytes`](crate::Limits::max_moov_bytes).
+    MoovBytes,
 }
 
 /// Every error of this crate. Limit errors are one variant with a [`Limit`] so a caller can
@@ -35,6 +37,9 @@ pub enum Error {
     UnknownFormat,
     /// The file has no top-level `meta` box.
     NoMeta,
+    /// [`parse_movie`](crate::parse_movie) or [`read_movie`](crate::read_movie): the file has no
+    /// top-level `moov` box.
+    NoMoov,
     /// A box or the data of an item runs past the end of the input.
     Truncated,
     /// A structure is invalid. The text names it, for example `"iloc"`. It is a short stable
@@ -60,6 +65,7 @@ impl fmt::Display for Error {
         match self {
             Self::UnknownFormat => f.write_str("unknown format"),
             Self::NoMeta => f.write_str("no meta box"),
+            Self::NoMoov => f.write_str("no moov box"),
             Self::Truncated => f.write_str("truncated input"),
             Self::Malformed(what) => write!(f, "malformed {what}"),
             Self::Unsupported(what) => write!(f, "unsupported {what}"),
@@ -75,13 +81,14 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl Error {
-    /// A short stable token per variant (`unknown-format`, `no-meta`, `truncated`, `malformed`,
+    /// A short stable token per variant (`unknown-format`, `no-meta`, `no-moov`, `truncated`, `malformed`,
     /// `unsupported`, `no-such-item`, `limit-<field>`, `out-of-memory`, `cancelled`, `io`). The
     /// parity oracle writes it.
     pub fn class(&self) -> &'static str {
         match self {
             Self::UnknownFormat => "unknown-format",
             Self::NoMeta => "no-meta",
+            Self::NoMoov => "no-moov",
             Self::Truncated => "truncated",
             Self::Malformed(_) => "malformed",
             Self::Unsupported(_) => "unsupported",
@@ -98,6 +105,7 @@ impl Error {
                 Limit::Pixels => "limit-pixels",
                 Limit::MetaBytes => "limit-meta-bytes",
                 Limit::MetadataBytes => "limit-metadata-bytes",
+                Limit::MoovBytes => "limit-moov-bytes",
             },
             Self::OutOfMemory => "out-of-memory",
             Self::Cancelled => "cancelled",

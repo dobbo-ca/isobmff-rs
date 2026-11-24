@@ -15,7 +15,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY tests/fuzz/Cargo.toml tests/fuzz/Cargo.lock tests/fuzz/
 RUN mkdir -p src tests/fuzz/fuzz_targets && touch src/lib.rs \
-    && for t in parse read boxes iloc iinf iref ipma ipco derived tmap; do touch tests/fuzz/fuzz_targets/$t.rs; done \
+    && for t in parse read boxes iloc iinf iref ipma ipco derived tmap movie movie_read; do touch tests/fuzz/fuzz_targets/$t.rs; done \
     && cargo fetch --locked --manifest-path tests/fuzz/Cargo.toml \
     && rm -rf src tests/fuzz/fuzz_targets
 
@@ -123,11 +123,26 @@ RUN --mount=type=cache,id=isobmff-rs-target-parity,sharing=locked,target=/src/ta
 RUN --mount=type=cache,id=isobmff-rs-data,target=/data,sharing=locked,readonly \
     sh tests/parity/run.sh ref /ref
 
+# ffprobe (Debian bookworm ffmpeg, 5.1.x) and gawk, for gate 5 of tests/parity/run.sh: the MP4 tracks
+# of isobmff-rs are compared with the packets that ffprobe reads. The pinned ffmpeg is used when
+# bookworm still has it, else the current one; summary.md prints the version either way. gawk -M
+# (64-bit integers) is checked here, so a gawk without it fails the build, not the gate.
+FROM toolchain AS parity-tools
+RUN apt-get update && apt-get install -y --no-install-recommends gawk \
+    && { apt-get install -y --no-install-recommends ffmpeg=7:5.1.9-0+deb12u1 || apt-get install -y --no-install-recommends ffmpeg; } \
+    && ffprobe -version | head -n 1 \
+    && test "$(gawk -M 'BEGIN { print 9223372036854775807 + 1 }')" = 9223372036854775808 \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM parity-tools AS parity-src
+ENV CARGO_NET_OFFLINE=true
+COPY . .
+
 # Parity gates (tests/parity/run.sh full): libheif and libavif vs isobmff-rs on the corpus, the
-# mutations, --threads 1 vs default, --read vs slice. The stage does not fail on a diff: the report
+# mutations, --threads 1 vs default, --read vs slice, ffprobe vs the MP4 tracks. The stage does not fail on a diff: the report
 # (summary.md, *.diff, status) is the build output (target parity-report), and the workflow fails
 # on `status`, as the report is wanted most when the gate is red.
-FROM src AS parity
+FROM parity-src AS parity
 COPY --from=c-oracle /usr/local/bin/heif-oracle /usr/local/bin/heif-oracle
 COPY --from=c-oracle /usr/local/bin/avif-oracle /usr/local/bin/avif-oracle
 COPY --from=data /data.list /data.list

@@ -17,6 +17,8 @@ call `isobmff::__fuzz::*` (hidden, `fn(&[u8], &Limits) -> Result<(), Error>` on 
 | `ipco` | `__fuzz::ipco` | every property parser |
 | `derived` | `__fuzz::grid` and `__fuzz::iovl` | grid and overlay payloads |
 | `tmap` | `__fuzz::tmap` | ISO 21496-1 payload, both layouts |
+| `movie` | `__fuzz::movie` | `parse_movie` on the whole input, then for every track a walk of all samples, `sync_samples(4)` and `sync_sample_at` at `i64::MIN`, 0 and `i64::MAX`, over `Cursor::new(data)` |
+| `movie_read` | `read_movie` over a `Cursor` | equals `parse_movie` (`Ok` and `Err`), and the first 256 samples of every track are equal |
 
 Every target uses a `max_alloc` far below `-malloc_limit_mb=512`; a peak above it is a bug in the
 charging.
@@ -24,13 +26,14 @@ charging.
 ## CI
 
 `.github/workflows/fuzz.yml` runs weekly, Monday 12:23 UTC (`cron: '23 12 * * 1'`), and on
-`workflow_dispatch`; never on push or pull request. Matrix over the ten targets with
+`workflow_dispatch`; never on push or pull request. Matrix over the twelve targets with
 `max-parallel: 2` (x86 only: no SIMD, so no arm64 job; the conventions ask for a fuzz-arm64 matrix, left out on purpose). Each target runs
 `cargo +nightly fuzz run --fuzz-dir tests/fuzz <target> ... -- -max_total_time=$MAX_TOTAL_TIME
 -timeout=60 -rss_limit_mb=2048 -malloc_limit_mb=512`. Crash artifacts are uploaded; the grown
 corpus is kept in the Actions cache.
 
-Seeds are the first 64 KiB of every parity corpus file, gathered in the fuzz image build
+Seeds are the first 64 KiB of every parity corpus file (the MP4 files up to 1 MiB whole, as their `moov` is often
+past 64 KiB), gathered in the fuzz image build
 (`tests/parity/run.sh gather`), plus `tests/data/fuzz-grown` if present.
 
 Fuzzing runs in CI only. Dispatch a 15-minute run per target:

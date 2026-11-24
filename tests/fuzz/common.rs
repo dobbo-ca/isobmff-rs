@@ -94,7 +94,10 @@ pub fn parse_all(data: &[u8]) -> Result<Heif, Error> {
     r
 }
 
-/// True for the errors that only one of `parse` and `read` can give (`read` copies `meta`).
+/// True for the errors that only one of `parse` and `read` can give (`read` copies `meta`, `read_movie` copies `moov`).
 pub fn read_only_limit(e: &Error) -> bool {
-    matches!(e, Error::LimitExceeded(Limit::Alloc | Limit::MetaBytes))
+    matches!(
+        e,
+        Error::LimitExceeded(Limit::Alloc | Limit::MetaBytes | Limit::MoovBytes)
+    )
 }

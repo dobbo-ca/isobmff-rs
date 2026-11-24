@@ -1,9 +1,11 @@
 # Parity corpus
 
-Public HEIF/AVIF samples at pinned commits, listed in `tests/parity/corpus.toml`. Nothing of it is
+Public HEIF/AVIF and MP4/MOV samples at pinned commits, listed in `tests/parity/corpus.toml`. Nothing of it is
 stored in this repo: `tests/parity/fetch.sh` makes a blobless sparse checkout per source into the
-BuildKit cache mount `isobmff-rs-data`. About 630 files; the gate fails below `PARITY_MIN_INPUTS`
-(600). Research of 2026-11-19 used the GitHub API only; the feature tags below come from each
+BuildKit cache mount `isobmff-rs-data`. About 630 HEIF and AVIF files; gate 4 fails below `PARITY_MIN_INPUTS`
+(600). The MP4/MOV sources (named `mp4-*`, about 200 files, see below) are read by gate 5 only: it also reads
+every file above that has a `moov` (the animated AVIF files). `PARITY_MIN_MP4` (100) is a guess: set it from
+the first green run. Research of 2026-11-19 used the GitHub API only; the feature tags below come from each
 source's own docs and file names, not from inspecting the files, so check them with the first run.
 
 ## Sources
@@ -19,6 +21,26 @@ source's own docs and file names, not from inspecting the files, so check them w
 | mozilla/mp4parse-rust | `d3a9abfc` | 69 | no data statement; repo MPL-2.0 | small valid and corrupt AVIF: colr kinds, ipma, essential flags, odd box sizes |
 | imazen/heic `testdata/apple-hdr` | `4d72cadd` | 1 | `testdata/README.md`: "Licensed under the MIT License" | Apple `hdrgainmap` aux image and its XMP |
 | aaron-rust/hdr-sample-images | `df0d5df4` | 4 (LFS) | `README.md:31`: "All image files in this repository are licensed under the Creative Commons Zero (CC0) license" | large HEVC/AV1 images, grids, HDR |
+
+## MP4/MOV sources (gate 5)
+
+| Source | Commit | Files | Licence (quoted) | Covers |
+|---|---|---|---|---|
+| MPEGGroup/FileFormatConformance `mp4-ffc` | `767a5bcb` | about 160 (LFS) | `LICENSE:1-3`: "The Clear BSD License / Copyright (c) 2023, Apple Inc."; `README.md:37`: "This project operates under the Clear BSD License"; the per-file `.json` licence is empty except for the RA_BodeMuseum files (CC BY-NC-ND 4.0, excluded) | `ctts` v0 (about 45 files) and v1 with negative offsets (`17_negative_ctso`, `hvc2_extractors`, `vvc_basic_track`), `elst` with media_time, `stz2` (`a7-tone-oddities`, `04_bifs_video`, `02_dref_edts_img`), external `url ` drefs (`02_dref_edts_img`, `04_bifs_video`, `a6_tone_multifile`), `sbgp 'rap '`, avc1, hvc1/hev1, mp4v, vvc1, samr, encv; fragmented files (kept raw for now). No AV1. |
+| link-u/avif-sample-images `mp4-link-u` | `c666a368` | 1 (`star.mp4`) | `README.md:550`: "License: CC-BY" | AV1 in MP4 with `stss` and `elst`; its `star-*.avifs` are in the HEIF source above |
+| mozilla/mp4parse-rust `mp4-mp4parse` | `d3a9abfc` | about 40 | no data statement; repo MPL-2.0 (same basis as above); `bbb_*` is Blender, CC BY | `chunk_out_of_range`, `stco_extra_chunk`, `zero_empty_stsc`, `no_timescale`, `tiny_av1`, amr/h263/mp4v 3gp, init-only files with 0 samples |
+
+Also in gate 5, from the HEIF sources above: the animated AVIF files of libavif (`colors-animated-*`,
+`animated_alpha_sample_without_shown_frame`: av01 `trak`, `stss`, `elst`, an alpha `auxv` track, an `mp4a` track), the
+`star-*.avifs` of link-u and the avis files of mp4parse-rust.
+
+Not used in gate 5: the 12 FFC segment files that have no `moov` (`mp4-live-LastTime-depRep-R*-000*.mp4`,
+`hev1_clg1_segment.m4s`, `DDF_10s_25fps-dynamic_rep-R*_seg-0005.3gs`; they need their init file in front, and
+fragments are the next step), the two FFC `.mp4.zip` files of more than 4 GB (the only `co64` files), the 6
+RA_BodeMuseum files, mp4parse-rust `bipbop*` (Apple content, no grant). Not usable on licence: FFmpeg FATE
+(no licence; best edit-list cases), Chromium `media/test/data` (no per-file grant), gpac testsuite, Bento4
+`Test/Data` (GPL), libheif sequence files (no data grant). `fetch.sh` passes the exclude globs of an LFS
+source to `git lfs pull`, so an excluded file is not downloaded.
 
 ## Gaps
 

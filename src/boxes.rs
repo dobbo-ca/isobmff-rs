@@ -172,6 +172,7 @@ pub(crate) struct Boxes<'c, 'a> {
     end: u64,
     top: bool,
     counted: bool,
+    lenient: bool,
 }
 
 impl<'c, 'a> Boxes<'c, 'a> {
@@ -195,12 +196,20 @@ impl<'c, 'a> Boxes<'c, 'a> {
             end: range.end,
             top,
             counted: true,
+            lenient: false,
         })
+    }
+
+    /// Ends the walk when fewer than 8 bytes are left, instead of failing on them (the 4-byte
+    /// terminator that QuickTime writes after the children of a sample entry).
+    pub(crate) fn lenient_tail(mut self) -> Self {
+        self.lenient = true;
+        self
     }
 
     /// The next child, `None` at the end of the range. Each header counts one box.
     pub(crate) fn next_box(&mut self) -> Result<Option<BoxHeader>, Error> {
-        if self.pos >= self.end {
+        if self.pos >= self.end || (self.lenient && self.end.saturating_sub(self.pos) < 8) {
             return Ok(None);
         }
         if self.counted {

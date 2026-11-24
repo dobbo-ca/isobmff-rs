@@ -905,3 +905,344 @@ pub fn all_files() -> Vec<(&'static str, Vec<u8>)> {
     }
     v
 }
+
+// ---- MP4 / MOV ----
+
+/// File offset of the first byte of the `mdat` payload that [`mp4`] writes.
+pub const MDAT0: u32 = 28;
+
+fn be(v: &[u32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_be_bytes()).collect()
+}
+
+/// A table box: FullBox, `entry_count`, entries.
+fn counted(kind: &[u8; 4], version: u8, count: usize, entries: &[u8]) -> Vec<u8> {
+    fbx(
+        kind,
+        version,
+        0,
+        &cat(&[&(count as u32).to_be_bytes(), entries]),
+    )
+}
+
+pub fn stts(runs: &[(u32, u32)]) -> Vec<u8> {
+    let e: Vec<u8> = runs.iter().flat_map(|&(c, d)| be(&[c, d])).collect();
+    counted(b"stts", 0, runs.len(), &e)
+}
+
+/// `ctts` with signed offsets (version 0 or 1 have the same bytes).
+pub fn ctts(version: u8, runs: &[(u32, i32)]) -> Vec<u8> {
+    let e: Vec<u8> = runs
+        .iter()
+        .flat_map(|&(c, o)| cat(&[&c.to_be_bytes(), &o.to_be_bytes()]))
+        .collect();
+    counted(b"ctts", version, runs.len(), &e)
+}
+
+pub fn stss(list: &[u32]) -> Vec<u8> {
+    counted(b"stss", 0, list.len(), &be(list))
+}
+
+/// `stsc` from (first_chunk, samples_per_chunk, sample_description_index).
+pub fn stsc(runs: &[(u32, u32, u32)]) -> Vec<u8> {
+    let e: Vec<u8> = runs.iter().flat_map(|&(a, b, c)| be(&[a, b, c])).collect();
+    counted(b"stsc", 0, runs.len(), &e)
+}
+
+pub fn stsz(sizes: &[u32]) -> Vec<u8> {
+    fbx(
+        b"stsz",
+        0,
+        0,
+        &cat(&[
+            &0u32.to_be_bytes(),
+            &(sizes.len() as u32).to_be_bytes(),
+            &be(sizes),
+        ]),
+    )
+}
+
+pub fn stsz_const(size: u32, count: u32) -> Vec<u8> {
+    fbx(b"stsz", 0, 0, &be(&[size, count]))
+}
+
+/// `stz2` with 4, 8 or 16-bit fields (4-bit: high nibble first).
+pub fn stz2(field: u8, sizes: &[u32]) -> Vec<u8> {
+    let mut data = Vec::new();
+    match field {
+        4 => {
+            for pair in sizes.chunks(2) {
+                let hi = (pair[0] as u8) << 4;
+                data.push(hi | pair.get(1).map_or(0, |&b| b as u8));
+            }
+        }
+        8 => data.extend(sizes.iter().map(|&s| s as u8)),
+        _ => {
+            for &s in sizes {
+                data.extend_from_slice(&(s as u16).to_be_bytes());
+            }
+        }
+    }
+    fbx(
+        b"stz2",
+        0,
+        0,
+        &cat(&[
+            &[0, 0, 0, field],
+            &(sizes.len() as u32).to_be_bytes(),
+            &data,
+        ]),
+    )
+}
+
+pub fn stco(offsets: &[u32]) -> Vec<u8> {
+    counted(b"stco", 0, offsets.len(), &be(offsets))
+}
+
+pub fn co64(offsets: &[u64]) -> Vec<u8> {
+    let e: Vec<u8> = offsets.iter().flat_map(|o| o.to_be_bytes()).collect();
+    counted(b"co64", 0, offsets.len(), &e)
+}
+
+/// An `stsd` with one visual entry of type `kind`: the 78 fixed bytes, then `children` as given.
+pub fn stsd_visual(kind: &[u8; 4], w: u16, h: u16, children: &[u8]) -> Vec<u8> {
+    let entry = bx(
+        kind,
+        &cat(&[
+            &[0; 6],
+            &1u16.to_be_bytes(),
+            &[0; 16],
+            &w.to_be_bytes(),
+            &h.to_be_bytes(),
+            &[0; 50],
+            children,
+        ]),
+    );
+    fbx(b"stsd", 0, 0, &cat(&[&1u32.to_be_bytes(), &entry]))
+}
+
+/// The default `stsd` of the test tracks: `hvc1` 64 x 48 with `hvcC` and `pasp`.
+pub fn stsd_hvc1() -> Vec<u8> {
+    stsd_visual(b"hvc1", 64, 48, &cat(&[&hvcc(), &pasp(1, 1)]))
+}
+
+/// An `stsd` with one audio entry (not parsed beyond its first 8 bytes).
+pub fn stsd_audio() -> Vec<u8> {
+    let entry = bx(b"mp4a", &cat(&[&[0; 6], &1u16.to_be_bytes(), &[0; 20]]));
+    fbx(b"stsd", 0, 0, &cat(&[&1u32.to_be_bytes(), &entry]))
+}
+
+pub const IDENTITY: [i32; 9] = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x4000_0000];
+
+pub fn tkhd(id: u32, w: u32, h: u32, matrix: [i32; 9]) -> Vec<u8> {
+    let m: Vec<u8> = matrix.iter().flat_map(|x| x.to_be_bytes()).collect();
+    fbx(
+        b"tkhd",
+        0,
+        3,
+        &cat(&[
+            &[0; 8],
+            &id.to_be_bytes(),
+            &[0; 4],
+            &1000u32.to_be_bytes(),
+            &[0; 16],
+            &m,
+            &(w << 16).to_be_bytes(),
+            &(h << 16).to_be_bytes(),
+        ]),
+    )
+}
+
+pub fn mvhd(timescale: u32, duration: u32) -> Vec<u8> {
+    fbx(
+        b"mvhd",
+        0,
+        0,
+        &cat(&[
+            &[0; 8],
+            &timescale.to_be_bytes(),
+            &duration.to_be_bytes(),
+            &[0; 80],
+        ]),
+    )
+}
+
+pub fn mdhd(timescale: u32, duration: u32) -> Vec<u8> {
+    fbx(
+        b"mdhd",
+        0,
+        0,
+        &cat(&[
+            &[0; 8],
+            &timescale.to_be_bytes(),
+            &duration.to_be_bytes(),
+            &[0; 4],
+        ]),
+    )
+}
+
+pub fn hdlr(handler: &[u8; 4]) -> Vec<u8> {
+    fbx(b"hdlr", 0, 0, &cat(&[&[0; 4], handler, &[0; 12], b"x\0"]))
+}
+
+/// `edts/elst` with version 0 entries (segment_duration, media_time).
+pub fn edts_v0(entries: &[(u32, i32)]) -> Vec<u8> {
+    let e: Vec<u8> = entries
+        .iter()
+        .flat_map(|&(d, t)| cat(&[&d.to_be_bytes(), &t.to_be_bytes(), &[0, 1, 0, 0]]))
+        .collect();
+    bx(b"edts", &counted(b"elst", 0, entries.len(), &e))
+}
+
+/// `edts/elst` with version 1 entries.
+pub fn edts_v1(entries: &[(u64, i64)]) -> Vec<u8> {
+    let e: Vec<u8> = entries
+        .iter()
+        .flat_map(|&(d, t)| cat(&[&d.to_be_bytes(), &t.to_be_bytes(), &[0, 1, 0, 0]]))
+        .collect();
+    bx(b"edts", &counted(b"elst", 1, entries.len(), &e))
+}
+
+/// A `trak`. The fields can be changed before [`Trak::build`].
+pub struct Trak {
+    pub id: u32,
+    pub handler: [u8; 4],
+    pub timescale: u32,
+    pub matrix: [i32; 9],
+    /// Children of `stbl`, in order.
+    pub stbl: Vec<Vec<u8>>,
+    /// Extra boxes under `trak`, `mdia` and `minf` (after the usual children).
+    pub trak_extra: Vec<Vec<u8>>,
+    pub mdia_extra: Vec<Vec<u8>>,
+    pub minf_extra: Vec<Vec<u8>>,
+}
+
+impl Trak {
+    /// A video track whose `stbl` is `stsd_hvc1()` and then `tables`.
+    pub fn video(id: u32, tables: &[Vec<u8>]) -> Trak {
+        let mut stbl = vec![stsd_hvc1()];
+        stbl.extend_from_slice(tables);
+        Trak {
+            id,
+            handler: *b"vide",
+            timescale: 30000,
+            matrix: IDENTITY,
+            stbl,
+            trak_extra: Vec::new(),
+            mdia_extra: Vec::new(),
+            minf_extra: Vec::new(),
+        }
+    }
+
+    pub fn build(&self) -> Vec<u8> {
+        let stbl = bx(b"stbl", &self.stbl.concat());
+        let minf = bx(b"minf", &cat(&[&stbl, &self.minf_extra.concat()]));
+        let mdia = bx(
+            b"mdia",
+            &cat(&[
+                &mdhd(self.timescale, 90000),
+                &hdlr(&self.handler),
+                &minf,
+                &self.mdia_extra.concat(),
+            ]),
+        );
+        bx(
+            b"trak",
+            &cat(&[
+                &tkhd(self.id, 64, 48, self.matrix),
+                &mdia,
+                &self.trak_extra.concat(),
+            ]),
+        )
+    }
+}
+
+/// `moov`: `mvhd` (timescale 1000), the tracks, then `extra` boxes.
+pub fn moov(tracks: &[Vec<u8>], extra: &[Vec<u8>]) -> Vec<u8> {
+    bx(
+        b"moov",
+        &cat(&[&mvhd(1000, 5000), &tracks.concat(), &extra.concat()]),
+    )
+}
+
+/// `ftyp`, an `mdat` of `mdat_len` bytes (byte `i` is `i % 251`), then `moov`. The `mdat`
+/// payload starts at [`MDAT0`].
+pub fn mp4(moov: &[u8], mdat_len: usize) -> Vec<u8> {
+    let data: Vec<u8> = (0..mdat_len).map(|i| (i % 251) as u8).collect();
+    cat(&[&bx(b"ftyp", b"isom\0\0\0\0isom"), &bx(b"mdat", &data), moov])
+}
+
+/// One video track of 7 samples: `stsc` with three runs (the middle one holds no samples, the
+/// last starts past the last chunk), variable sizes, `co64` or `stco`.
+pub fn movie_runs() -> Vec<u8> {
+    movie_runs_with(&[])
+}
+
+/// [`movie_runs`] with more tables (for example an `stss`) after the usual ones.
+pub fn movie_runs_with(extra: &[Vec<u8>]) -> Vec<u8> {
+    let at = |rel: u32| MDAT0 + rel;
+    let mut tables = vec![
+        stts(&[(7, 100)]),
+        stsc(&[(1, 2, 1), (3, 0, 1), (5, 1, 1), (8, 9, 1)]),
+        stsz(&[10, 11, 12, 13, 14, 15, 16]),
+        stco(&[at(0), at(100), at(200), at(300), at(400), at(500), at(600)]),
+    ];
+    tables.extend_from_slice(extra);
+    let t = Trak::video(1, &tables);
+    mp4(&moov(&[t.build()], &[]), 800)
+}
+
+/// A video track of 6 samples: `stss` [1, 4, 6], `ctts` v1 with a negative offset, `stz2`.
+pub fn movie_sync() -> Vec<u8> {
+    let t = Trak::video(
+        1,
+        &[
+            stts(&[(6, 10)]),
+            ctts(1, &[(1, 20), (2, -5), (3, 0)]),
+            stss(&[1, 4, 6]),
+            stsc(&[(1, 3, 1)]),
+            stz2(8, &[4, 5, 6, 7, 8, 9]),
+            co64(&[u64::from(MDAT0), u64::from(MDAT0) + 50]),
+        ],
+    );
+    mp4(&moov(&[t.build()], &[]), 200)
+}
+
+/// Video and audio tracks, an edit list, `udta` in `moov`.
+pub fn movie_two_tracks() -> Vec<u8> {
+    let mut v = Trak::video(
+        1,
+        &[
+            stts(&[(4, 1001)]),
+            stsc(&[(1, 4, 1)]),
+            stsz_const(5, 4),
+            stco(&[MDAT0]),
+        ],
+    );
+    v.trak_extra.push(edts_v0(&[(2000, -1), (3000, 0)]));
+    let mut a = Trak::video(
+        2,
+        &[
+            stts(&[(3, 1024)]),
+            stsc(&[(1, 3, 1)]),
+            stsz(&[1, 2, 3]),
+            stco(&[MDAT0 + 40]),
+        ],
+    );
+    a.handler = *b"soun";
+    a.stbl[0] = stsd_audio();
+    a.timescale = 48000;
+    mp4(
+        &moov(&[v.build(), a.build()], &[bx(b"udta", &[1, 2, 3, 4])]),
+        100,
+    )
+}
+
+/// Every sample movie file that parses, by name.
+pub fn all_movie_files() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        ("runs", movie_runs()),
+        ("sync", movie_sync()),
+        ("two_tracks", movie_two_tracks()),
+    ]
+}

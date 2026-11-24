@@ -9,13 +9,15 @@ All builds and tests run in CI (nothing runs on the owner's Mac).
 | `src/props/*` | ispe, pixi, colr, irot, imir, clap (`Clap::crop` rule), auxC, hvcC, av1C |
 | `src/derived.rs` | grid, iovl, tmap: both tmap layouts, bad denominators, trailing bytes |
 | `src/graph.rs`, `src/metadata.rs` | image kinds, transforms, alpha/depth/thumbnails, gain maps, top-level images, Exif/XMP bytes |
+| `src/movie/*`, `tests/movie.rs` | MP4/MOV: stsc runs (an empty run, a run past the last chunk), skips against walks, `stsz`/`stz2`/`stco`/`co64` forms, `stss` rules, `stts`/`ctts` (short tables, signed offsets), `sync_sample_at` (before, exact, between, after, tie, none), overflow and end of file, external `dref`, QuickTime without `ftyp`, `NoMoov`, two `moov`, `cmov`, raw boxes kept once, limits and cancel, `read_movie` equals `parse_movie` |
 | doc-test in `src/lib.rs` | `parse`, `primary_image`, `item_bytes` and `read` on a built file, with explicit `Limits` |
 | `tests/parity` | libheif and libavif against `examples/oracle.rs` on the corpus (docs/parity.md) |
-| `tests/fuzz` | ten cargo-fuzz targets (docs/fuzzing.md) |
+| `tests/fuzz` | twelve cargo-fuzz targets (docs/fuzzing.md) |
 
 Parity gates (`tests/parity/run.sh full`): corpus `diff -r` with `known-differences.tsv`; mutated
 files (truncations, bit flips, size edits) where both sides are `ok`; `--threads 1` and `--read`
-equal the default; a minimum input count (`PARITY_MIN_INPUTS`).
+equal the default; a minimum input count (`PARITY_MIN_INPUTS`); the MP4 tracks against ffprobe (corpus,
+mutations, `--read`, a minimum count of files with a video track: `PARITY_MIN_MP4`).
 
 ## CI jobs (`.github/workflows/ci.yml`)
 

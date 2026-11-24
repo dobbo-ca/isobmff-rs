@@ -122,6 +122,7 @@ fn limit_classes() {
         (Limit::Pixels, "limit-pixels"),
         (Limit::MetaBytes, "limit-meta-bytes"),
         (Limit::MetadataBytes, "limit-metadata-bytes"),
+        (Limit::MoovBytes, "limit-moov-bytes"),
     ];
     for (l, class) in all {
         assert_eq!(Error::LimitExceeded(l).class(), class);

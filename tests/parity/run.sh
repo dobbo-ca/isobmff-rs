@@ -5,20 +5,23 @@
 #   run.sh gather <dst>          seeds for the fuzz targets: the first 65536 bytes of every corpus
 #                                file and of tests/data/fuzz-grown/* (if present), each named by
 #                                its path with / replaced by __
-#   run.sh full <report-dir>     gates 1-4 of docs/parity.md; the report is summary.md, *.diff and
+#   run.sh full <report-dir>     gates 1-5 of docs/parity.md; the report is summary.md, *.diff and
 #                                a `status` written by the caller (0 only when every gate passed)
 #   run.sh ref <out-dir>         isobmff-oracle (x86_64) on the libheif and libavif test data
 #   run.sh arm <ref-dir>         the aarch64 isobmff-oracle under qemu-user on the same files,
 #                                compared with <ref-dir>
 # Binaries on PATH: isobmff-oracle (examples/oracle.rs), heif-oracle, avif-oracle (tests/parity/c);
-# for `arm` /usr/local/bin/isobmff-oracle-arm64, run by $ARM_RUN.
-# Environment: PARITY_MIN_INPUTS (default 600): the corpus has about 630 files (corpus.toml), so
-# a source that did not arrive fails gate 4 instead of shrinking the gates.
+# for `arm` /usr/local/bin/isobmff-oracle-arm64, run by $ARM_RUN; for gate 5 ffprobe and gawk.
+# Environment: PARITY_MIN_INPUTS (default 600): the HEIF and AVIF corpus has about 630 files
+# (corpus.toml), so a source that did not arrive fails gate 4 instead of shrinking the gates.
+# PARITY_MIN_MP4 (default 100): the least number of corpus files with a gated MP4 video track.
+# The sources named mp4-* in corpus.toml are read by gate 5 only.
 set -u
 export LC_ALL=C
 W=/work
 D=${DATA:-/data}
 MIN=${PARITY_MIN_INPUTS:-600}
+MIN_MP4=${PARITY_MIN_MP4:-100}
 KNOWN=tests/parity/known-differences.tsv
 tab=$(printf '\t')
 LIST=${DATA_LIST:-/data.list}
@@ -45,6 +48,10 @@ gather() {
   mkdir -p "$1"
   corpus "$1" 65536
   [ -d tests/data/fuzz-grown ] && find tests/data/fuzz-grown -type f ! -name '.*' | flat "$1" tests/data 65536
+  # MP4 files up to 1 MiB whole: the moov box is often past the first 64 KiB.
+  while IFS=$tab read -r name key; do
+    case $name in mp4-*) find "$D/v/$key/$name" -type f -size -1048577c | flat "$1" "$D/v/$key" ;; esac
+  done < "$LIST"
   return 0
 }
 
@@ -154,12 +161,67 @@ errors() {
     END { for (n in names) printf "%s\t%s\t%s\t%s\n", n, pair, o[n], r[n] }' "$2" "$3" | sort
 }
 
+# mp4_cmp <name>: ffprobe on one input of gate 5 and the comparison with the isobmff-rs tracks.txt.
+# The mismatch lines go to $W/d1; $fe is 1 when ffprobe failed or printed errors.
+mp4_cmp() {
+  ft=$W/mff/$1
+  sh tests/parity/ffprobe-tracks.sh "$W/mp4in/$1" "$ft" > "$ft.txt" 2> /dev/null
+  fe=0
+  [ "$(cat "$ft.rc" 2> /dev/null)" = 0 ] || fe=1
+  [ ! -s "$ft.err" ] || fe=1
+  gawk -M -v fferr=$fe -f tests/parity/mp4cmp.awk "$W/m1/$1/tracks.txt" "$ft.txt" > $W/d1 2>&1
+}
+
+# mp4_corpus: gate 5a and the count of gate 5d. Every corpus file whose isobmff-rs tracks.txt has
+# a sample or an error line of a gated track goes through ffprobe; known-differences.tsv lines of
+# side mp4 work as in gate 1. $gated counts the files with at least one sample line.
+mp4_corpus() {
+  : > $W/d-mp4; : > $W/d-mp4cover
+  gated=0
+  while IFS= read -r n; do
+    grep -qE '^(s|e) ' "$W/m1/$n/tracks.txt" 2> /dev/null || continue
+    echo "$n${tab}mp4" >> $W/seen
+    ! grep -q '^s ' "$W/m1/$n/tracks.txt" || gated=$((gated + 1))
+    mp4_cmp "$n"
+    reason=$(awk -F'\t' -v n="$n" '$1 == n && $2 == "mp4" { print $3; exit }' $W/known)
+    if [ ! -s $W/d1 ]; then
+      [ -z "$reason" ] || echo "stale known difference: $n (mp4) is now identical" >> $W/d-stale
+    elif [ -n "$reason" ]; then
+      { echo "=== $n (mp4), known: $reason"; head -n 40 $W/d1; } >> $W/d-known
+    else
+      { echo "=== $n (mp4)"; head -n 100 $W/d1; } >> $W/d-mp4
+    fi
+  done < $W/mp4corpus.names
+  [ "$gated" -ge "$MIN_MP4" ] || echo "mp4 corpus has $gated files with a gated track, want at least $MIN_MP4" > $W/d-mp4cover
+}
+
+# mp4_mut: gate 5b. A mutation is compared when isobmff-rs reads its samples to the end (no `e`
+# line) and ffprobe exited 0 with nothing on stderr; the others are only counted.
+mp4_mut() {
+  : > $W/d-mp4-mut
+  cmpd=0 skip=0
+  while IFS= read -r n; do
+    grep -q '^s ' "$W/m1/$n/tracks.txt" 2> /dev/null || continue
+    if grep -q '^e ' "$W/m1/$n/tracks.txt"; then skip=$((skip + 1)); continue; fi
+    mp4_cmp "$n"
+    if [ "$fe" -ne 0 ]; then skip=$((skip + 1)); continue; fi
+    cmpd=$((cmpd + 1))
+    # a mutation of a file listed in known-differences.tsv for side mp4 is not diffed
+    awk -F'\t' -v n="${n%.*}" '$1 == n && $2 == "mp4" { f = 1 } END { exit !f }' $W/known && continue
+    [ ! -s $W/d1 ] || { echo "=== $n (mp4)"; head -n 100 $W/d1; } >> $W/d-mp4-mut
+  done < $W/mp4mut.names
+  echo "| mp4 mutations with samples: compared / not compared (isobmff-rs error or ffprobe error) | $cmpd / $skip |" >> $W/split.md
+}
+
 full() {
   REP=$1 bad=0
-  rm -rf $W; mkdir -p "$REP" $W/corpus $W/small $W/mut $W/all
+  rm -rf $W; mkdir -p "$REP" $W/corpus $W/mp4c $W/small $W/msmall $W/mut $W/mmut $W/all $W/mp4in $W/mff
   # --- the inputs
   corpus $W/corpus
   [ -d tests/data/fuzz-grown ] && find tests/data/fuzz-grown -type f ! -name '.*' | flat $W/corpus tests/data
+  # The MP4 sources (named mp4-* in corpus.toml) are for gate 5 only: libheif and libavif do not
+  # read them, and the HEIF and AVIF gates stay as they were.
+  for f in $W/corpus/mp4-*; do [ ! -e "$f" ] || mv "$f" $W/mp4c/; done
   ls $W/corpus > $W/corpus.names
   cn=$(wc -l < $W/corpus.names)
   # gate 4
@@ -168,6 +230,12 @@ full() {
   run isobmff-oracle gen $W/small $W/mut
   ls $W/mut > $W/mut.names
   cp -al $W/corpus/. $W/all/ && cp -al $W/mut/. $W/all/ || bad=1
+  # gate 5 inputs: the whole corpus, the MP4 sources and the mutations of both
+  find $W/mp4c -type f -size -1048576c | while IFS= read -r f; do ln "$f" $W/msmall/; done
+  run isobmff-oracle gen $W/msmall $W/mmut
+  cp -al $W/corpus/. $W/mp4in/ && cp -al $W/mp4c/. $W/mp4in/ && cp -al $W/mut/. $W/mp4in/ && cp -al $W/mmut/. $W/mp4in/ || bad=1
+  { ls $W/corpus; ls $W/mp4c; } | sort > $W/mp4corpus.names
+  { ls $W/mut; ls $W/mmut; } > $W/mp4mut.names
 
   # --- the oracles, on corpus + mutations
   mkdir -p $W/ch $W/ca $W/rh $W/ra $W/rh1 $W/rhr
@@ -178,6 +246,9 @@ full() {
   run isobmff-oracle heif --threads 1 $W/all $W/rh1
   run isobmff-oracle heif --read $W/all $W/rhr
   run isobmff-oracle stats $W/corpus $W/stats.tsv
+  mkdir -p $W/m1 $W/m2
+  run isobmff-oracle mp4 $W/mp4in $W/m1 2> $W/m1.err
+  run isobmff-oracle mp4 --read $W/mp4in $W/m2
 
   # --- gate 1: corpus, with known differences
   awk -F'\t' 'NR > 1 && !/^#/ && NF >= 2' $KNOWN > $W/known
@@ -185,6 +256,7 @@ full() {
   { ls $W/ca; ls $W/ra; } | sort -u | comm -12 - $W/corpus.names > $W/avif.names
   corpus_side heif $W/ch $W/rh $W/corpus.names
   corpus_side avif $W/ca $W/ra $W/avif.names
+  mp4_corpus
   while IFS=$tab read -r kn ks kr; do
     [ -n "$kn" ] || continue
     grep -qxF "$kn$tab$ks" $W/seen || echo "stale known difference: $kn ($ks) was not compared" >> $W/d-stale
@@ -194,10 +266,12 @@ full() {
   : > $W/split.md
   mut_side heif graph.txt $W/ch $W/rh $W/mut.names libheif
   mut_side avif avif.txt $W/ca $W/ra $W/mut.names libavif
+  mp4_mut
 
   # --- gate 3: threads and read, on the corpus and the mutations
   diff -rq $W/rh $W/rh1 > $W/d-threads
   diff -rq $W/rh $W/rhr > $W/d-read
+  diff -rq $W/m1 $W/m2 > $W/d-mp4read
 
   {
     echo "## isobmff-rs parity"; echo
@@ -209,6 +283,9 @@ full() {
     echo "| corpus, isobmff-rs heif ok / error / missing | $(okcount $W/rh graph.txt $W/corpus.names) |"
     echo "| corpus, libavif ok / error / missing | $(okcount $W/ca avif.txt $W/avif.names) |"
     echo "| corpus, isobmff-rs avif ok / error / missing | $(okcount $W/ra avif.txt $W/avif.names) |"
+    echo "| mp4 inputs: corpus files (all sources) / mutations | $(wc -l < $W/mp4corpus.names) / $(wc -l < $W/mp4mut.names) |"
+    echo "| mp4 corpus files with a gated video track (least $MIN_MP4) | $gated |"
+    echo "| ffprobe | $(ffprobe -version 2>&1 | head -n 1) |"
     cat $W/split.md
     echo; echo "| gate | result |"; echo "|---|---|"
   } > "$REP/summary.md"
@@ -220,17 +297,21 @@ full() {
   gate "3 isobmff-rs heif: --threads 1 vs default" $W/d-threads
   gate "3 isobmff-rs heif: --read vs slice" $W/d-read
   gate "4 coverage: corpus files >= $MIN" $W/d-cover
+  gate "5a corpus: ffprobe vs isobmff-rs mp4" $W/d-mp4
+  gate "5b mutations: ffprobe vs isobmff-rs mp4 where read to the end" $W/d-mp4-mut
+  gate "5c isobmff-rs mp4: --read vs slice" $W/d-mp4read
+  gate "5d coverage: corpus files with a gated video track >= $MIN_MP4" $W/d-mp4cover
   [ -s $W/d-known ] && { echo; echo "known differences (not counted, docs/parity.md):"; echo; sed 's/^/    /' $W/d-known; } >> "$REP/summary.md"
   stats_table >> "$REP/summary.md"
   { printf 'name\tpair\toracle\tisobmff-rs\n'; errors heif $W/ch.err $W/rh.err; errors avif $W/ca.err $W/ra.err; } > "$REP/errors.tsv"
 
   # the diffs: one file each in the report, and the first 200 lines in summary.md
-  for d in d-heif d-avif d-stale d-mut-heif d-mut-avif d-threads d-read d-known; do
+  for d in d-heif d-avif d-stale d-mut-heif d-mut-avif d-threads d-read d-known d-mp4 d-mp4-mut d-mp4read d-mp4cover; do
     [ -s $W/$d ] && { echo "=== $d"; cat $W/$d; } >> $W/all.diff
   done
   if [ -s $W/all.diff ]; then
     { echo; echo "first 200 diff lines:"; echo; head -n 200 $W/all.diff | sed 's/^/    /'; } >> "$REP/summary.md"
-    for d in d-heif d-avif d-stale d-mut-heif d-mut-avif d-threads d-read d-known; do
+    for d in d-heif d-avif d-stale d-mut-heif d-mut-avif d-threads d-read d-known d-mp4 d-mp4-mut d-mp4read d-mp4cover; do
       [ -s $W/$d ] && head -n 5000 $W/$d > "$REP/${d#d-}.diff"
     done
   fi
