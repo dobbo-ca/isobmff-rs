@@ -207,6 +207,12 @@ impl<'c, 'a> Boxes<'c, 'a> {
         self
     }
 
+    /// Walks without counting boxes: for a second pass over children an earlier pass counted.
+    pub(crate) fn uncounted(mut self) -> Self {
+        self.counted = false;
+        self
+    }
+
     /// The next child, `None` at the end of the range. Each header counts one box.
     pub(crate) fn next_box(&mut self) -> Result<Option<BoxHeader>, Error> {
         if self.pos >= self.end || (self.lenient && self.end.saturating_sub(self.pos) < 8) {

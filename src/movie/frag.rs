@@ -259,8 +259,9 @@ fn parse_trun(ctx: &Ctx<'_>, h: &BoxHeader, tf: &Traf) -> Result<(Run, u64, i64)
     Ok((run, end, dts_end))
 }
 
-/// `traf` (depth 1 box). `tfhd` must come first. A `traf` of a track that is not in `moov` is
-/// kept whole in `other`. `implicit` is where the data of the last run of this `moof` ended.
+/// `traf` (depth 1 box). A `traf` without `tfhd`, of a track that is not in `moov` or of a track
+/// without `trex` is kept whole in `other`. `implicit` is where the data of the last run of this
+/// `moof` ended.
 fn parse_traf(
     ctx: &Ctx<'_>,
     h: &BoxHeader,
@@ -270,11 +271,24 @@ fn parse_traf(
     index: &[(u32, usize)],
     other: &mut Vec<(FourCc, Extent)>,
 ) -> Result<(), Error> {
+    // Like ffmpeg, the `tfhd` need not be first: other boxes may come before it (they are kept
+    // raw below). A `tfdt` or `trun` before it is malformed, and a `traf` without `tfhd` is kept
+    // whole.
     let mut boxes = Boxes::new(ctx, h.payload(), 2, false)?;
-    let first = boxes
-        .next_box()?
-        .filter(|c| &c.kind.0 == b"tfhd")
-        .ok_or(Error::Malformed("traf"))?;
+    let mut first = None;
+    while let Some(c) = boxes.next_box()? {
+        match &c.kind.0 {
+            b"tfhd" => {
+                first = Some(c);
+                break;
+            }
+            b"tfdt" | b"trun" => return Err(Error::Malformed("traf")),
+            _ => {}
+        }
+    }
+    let Some(first) = first else {
+        return keep(ctx.budget, other, h);
+    };
     let tf = parse_tfhd(ctx.slice(first.payload())?)?;
     let at = index.partition_point(|&(id, _)| id < tf.id);
     let found = index
@@ -284,7 +298,10 @@ fn parse_traf(
     let Some(t) = found else {
         return keep(ctx.budget, other, h);
     };
-    let trex = t.trex.ok_or(Error::Malformed("trex"))?;
+    // A track without `trex` has no defaults: its `traf` is kept whole, as for an unknown track.
+    let Some(trex) = t.trex else {
+        return keep(ctx.budget, other, h);
+    };
     let desc = tf.desc.unwrap_or(trex.desc);
     let known = usize::try_from(desc)
         .ok()
@@ -304,6 +321,11 @@ fn parse_traf(
         size: tf.size.unwrap_or(trex.size),
         flags: tf.flags.unwrap_or(trex.flags),
     };
+    // The boxes before the `tfhd` were counted by the first walk: keep them without counting.
+    let mut before = Boxes::new(ctx, h.payload().start..first.start, 2, false)?.uncounted();
+    while let Some(c) = before.next_box()? {
+        keep(ctx.budget, &mut t.other_boxes, &c)?;
+    }
     let mut ran = false;
     while let Some(c) = boxes.next_box()? {
         match &c.kind.0 {

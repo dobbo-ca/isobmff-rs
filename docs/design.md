@@ -139,8 +139,8 @@ method 2 is resolved first, at most 8 method-2 items in a row. Errors are item e
 than one `iloc` reference, a chain of more than 8 items or a cycle: `Unsupported("construction
 method 2")`; an extent_index of 0 or past `to`, or a range past the end of the source:
 `OutOfRange`; a source with no `iloc` entry: `NoLocation`; a source with an error gives that error.
-The chain length of each item is stored with its result (0 for methods 0 and 1, else 1 + the longest source chain) and a cycle is found by an in-progress mark, so the result of an item does not depend on the order items are visited in. Every extent of a method-2
-item and every source extent visited counts against `max_extents` (`Limit::Extents` fails the
+The chain length of each item is stored with its result (0 for methods 0 and 1, else 1 + the longest source chain) and a cycle is found by an in-progress mark, so whether an item succeeds does not depend on the order items are visited in. A chain found too long is stored only for the depth-0 item, so a later item that reaches the same chain walks it again; that repeated work is charged instead. The error variant of a failed item (`Unsupported("construction method 2")` or the error inherited from a source) can depend on the visit order, that is, on the item ids. Every extent of a method-2
+item, every source extent visited and every `iref` entry scanned to find an item's `iloc` reference counts against `max_extents` (`Limit::Extents` fails the
 parse); the result vectors are charged through the `Budget`.
 
 Item errors do not fail the parse: `Item::data` is `Result<Vec<Extent>, ItemError>`. A request for
@@ -203,7 +203,7 @@ and `av1C` parsers; a configuration of size 0 gives no property (the image then 
 | 2 | as 1 | alpha flag and `alpha_item_data_size > 0` | alpha data | `auxl` 2 to 1; `prem` 1 to 2 when `alpha_is_premultiplied` (libheif 1.23.7 omits `prem`) |
 | 3 | `tmap` | gain map | gain map metadata | `dimg` 3 to [1, 4] (or [1] without item 4), `altr` group [3, 1] (id 0); the derived payload is the byte 0 followed by the chunk, parsed by the normal `tmap` parser |
 | 4 | as 1, hidden | gain map data > 0 | gain map data | |
-| 6 | `Exif` | exif flag | Exif chunk | `cdsc` 6 to 1; no `exif_tiff_header_offset`: `Heif::metadata` returns the chunk as is |
+| 6 | `Exif` | exif flag | Exif chunk | `cdsc` 6 to 1; no `exif_tiff_header_offset`: `Heif::metadata` returns the chunk as is; `content_encoding` is `deflate` when `exif_xmp_compressed` (as for item 7), and the bytes are then a deflate stream, not TIFF data |
 | 7 | `mime` `application/rdf+xml` | xmp flag | XMP chunk | `cdsc` 7 to 1; `content_encoding` `deflate` when `exif_xmp_compressed` (the bytes stay as stored) |
 
 Items 2, 6 and 7 are not hidden (libheif prints `hidden=0` for them). Item data are single extents
@@ -452,7 +452,7 @@ impl Track {
 }
 ```
 
-- **Codec config of a sample:** `track.entries[sample.entry - 1].config()`. This is a `Property`, built by the same `parse_property` that `ipco` uses. `hvcC` gives `PropValue::Hvcc`, `av1C` gives `PropValue::Av1c`, and `avcC`/`vvcC` give `Unknown` with the payload `Extent`. `colr`, `pasp`, `clap` and the rest parse as they do in HEIF.
+- **Codec config of a sample:** `track.entries.get(sample.entry as usize - 1).and_then(|e| e.config())` (`entries` can be empty: `parse_stsd` accepts an `stsd` with no children, and `sample.entry` is 1-based). This is a `Property`, built by the same `parse_property` that `ipco` uses. `hvcC` gives `PropValue::Hvcc`, `av1C` gives `PropValue::Av1c`, and `avcC`/`vvcC` give `Unknown` with the payload `Extent`. `colr`, `pasp`, `clap` and the rest parse as they do in HEIF.
 - **Byte source.** The sample walks read table bytes through `Read + Seek`. In-memory callers pass `Cursor::new(data)`, and `&mut reader` also works. The `Movie` holds no borrow and no table bytes.
 - **Matrix, width, height.** `matrix` and the raw 16.16 `width` and `height` are `tkhd` values, so a caller can rotate a thumbnail without parsing `tkhd`; `tkhd` stays an `Extent` too.
 
@@ -532,7 +532,7 @@ Tables are not decoded into Vecs. At parse time each table's FullBox version and
   - `stss` present: a sample is sync when its number is listed. Entries must be at least 1 and strictly increasing, else `Malformed("stss")` (met when the walk reads that entry). Entries past `sample_count` are ignored.
   - An empty `stss` means no sync samples.
   - `stps`, `sdtp` and `sbgp 'rap '` are kept raw and do not set `sync`.
-- **sync_samples(n).** Walks `stss` and skips to each listed sample, or takes samples 1..n when there is no `stss`; then the fragment samples that are sync. The Vec is charged for `min(n, listed or all moov samples + fragment samples)`.
+- **sync_samples(n).** Walks `stss` and skips to each listed sample, or takes samples 1..n when there is no `stss`; then the fragment samples that are sync. The Vec is charged as it grows (doubling). With no `stss` the scan stops with `Malformed("stsz")` at a sample number above the file length (overlapping samples), and the fragment loop stops with `Malformed("trun")` likewise.
 - **sync_sample_at(t).** `t` is in the track's media timescale, on the raw composition timeline (`pts = dts + cto`, no edit list).
   - It returns the sync sample with the greatest `pts <= t`; ties go to the lowest number.
   - When no sync sample has `pts <= t`, it returns the lowest-numbered sync sample. It returns `None` when the track has no sync sample.
@@ -548,18 +548,18 @@ Tables are not decoded into Vecs. At parse time each table's FullBox version and
 
 ### Limits and errors
 
-`max_moov_bytes` (64 MiB; `Limit::MoovBytes`, class `limit-moov-bytes`) caps the `moov` box, and each `moof` box, that `read_movie` copies. The 64 MiB default is an estimate: a 2-hour 60 fps file with B-frames and AAC has about 10 MB of `moov`. The existing limits also apply: `max_boxes` and `max_depth` to the `moov` walk, `max_properties` to the children of sample entries (all entries together), `max_alloc` to tracks, entries, properties, edits, `other_boxes`, the `dref` flags, the `trex` list, the `moof` headers, the fragment runs, the walk windows and the `sync_samples` Vec (the growing Vecs use the doubling-charged pattern of `meta/mod.rs`), and the cancel flag to boxes and walks. A walk allocates nothing whose size comes from the input; its time is bounded by the table bytes in the file, `sample_count` (at most chunks x file size for `moov` samples; fragment run counts are bounded only by the cancel flag, see Fragmented MP4) and the cancel flag.
+`max_moov_bytes` (64 MiB; `Limit::MoovBytes`, class `limit-moov-bytes`) caps the `moov` box, and each `moof` box, that `read_movie` copies. The 64 MiB default is an estimate: a 2-hour 60 fps file with B-frames and AAC has about 10 MB of `moov`. The existing limits also apply: `max_boxes` and `max_depth` to the `moov` walk, `max_properties` to the children of sample entries (all entries together), `max_alloc` to tracks, entries, properties, edits, `other_boxes`, the `dref` flags, the `trex` list, the `moof` headers, the fragment runs, the walk windows and the `sync_samples` Vec (the growing Vecs use the doubling-charged pattern of `meta/mod.rs`), and the cancel flag to boxes and walks. A walk allocates nothing whose size comes from the input; its time is bounded by the table bytes in the file, `sample_count` and the cancel flag. Chunk offsets may repeat and fragment runs may overlap, so the file size does not bound the samples; `sync_sample_at` (the `moov` loop without `stss`, and the fragment loop) and the same two loops of `sync_samples` stop with `Malformed("stsz")` or `Malformed("trun")` at a sample number above the file length. `samples()` is bounded by the caller's `n` and the cancel flag only.
 
-`Error::NoMoov` is new. Tokens used with `Malformed`: `moov mvhd tkhd mdhd hdlr stbl stsd stts ctts stss stsc stsz stz2 stco co64 elst dref mvex trex traf tfhd tfdt trun`. `Unsupported`: `cmov`, `data reference`. A sample past the end of the file is `Truncated`.
+`Error::NoMoov` is new. Tokens used with `Malformed`: `moov mvhd tkhd mdhd hdlr mdia minf stbl stsd stts ctts stss stsc stsz stz2 stco co64 elst dref mvex trex traf tfhd tfdt trun`. `Unsupported`: `cmov`, `data reference`. A sample past the end of the file is `Truncated`.
 
 ### Fragmented MP4
 
 `moov` with `mvex` makes the file fragmented (`Movie::fragmented`). Every top-level `moof` is parsed after `moov` and the walk of the top-level boxes (so a `moof` before `moov` works), in file order. `parse_movie` and `read_movie` give equal `Movie` values: `read_movie` collects the `moof` headers (charged), then copies each `moof` in turn (at most `max_moov_bytes`, charged, given back after the parse) and parses it with a `Src` whose `base` is the `moof` start, sharing the box counters. Nothing is copied or kept per sample.
 
 - **Precondition.** A `moof` when `moov` has no `mvex` is `Malformed("mvex")`.
-- **trex.** One per track id, read from the `trex` children of `mvex`; `mvex` itself stays in `Movie::other_boxes`. A duplicate is `Malformed("trex")`. A `traf` of a track in `moov` that has no `trex` is `Malformed("trex")`. A `trex` of an unknown track is ignored.
+- **trex.** One per track id, read from the `trex` children of `mvex`; `mvex` itself stays in `Movie::other_boxes`. A duplicate is `Malformed("trex")`. A `traf` of a track in `moov` that has no `trex` is kept whole in `Movie::other_boxes`, like a `traf` of an unknown track (ffmpeg ignores it: `mov.c` "could not find corresponding trex"), and adds no samples. A `trex` of an unknown track is ignored.
 - **moof.** Children other than `traf` (`mfhd`, `pssh`, ...) go to `Movie::other_boxes`, after the boxes of the top-level walk.
-- **traf.** `tfhd` must be the first child (else `Malformed("traf")`); its track id is not 0 (`Malformed("tfhd")`). A `traf` of a track id that is not in `moov` is kept whole in `Movie::other_boxes`. `tfdt` (v0 u32, v1 u64, above `i64::MAX` is `Malformed("tfdt")`) applies to the first run of the `traf` when it comes before that run. Each `trun` is a run. Other children go to the `other_boxes` of the track.
+- **traf.** Other boxes may come before the `tfhd` (as in ffmpeg) and go to the track's `other_boxes`; only a `tfdt` or `trun` before it is `Malformed("traf")`. A `traf` without `tfhd` is kept whole in `Movie::other_boxes`. The track id of the `tfhd` is not 0 (`Malformed("tfhd")`). A `traf` of a track id that is not in `moov`, or of a track without `trex`, is kept whole in `Movie::other_boxes` and is not used. `tfdt` (v0 u32, v1 u64, above `i64::MAX` is `Malformed("tfdt")`) applies to the first run of the `traf` when it comes before that run. Each `trun` is a run. Other children go to the `other_boxes` of the track.
 - **tfhd flags.** `0x01` base_data_offset (u64), `0x02` sample description index, `0x08` default duration, `0x10` default size, `0x20` default flags, `0x020000` default-base-is-moof. The description index (tfhd, else trex) must be in `1..=entries` (else `Malformed("tfhd")`).
 - **Base offset.** The explicit base when present. Else the `moof` start with default-base-is-moof. Else where the data of the last run of this `moof` ended (the `moof` start before any run), as ffmpeg does (`implicit_offset`, `mov.c:1435`, `5288`).
 - **Run start.** `base + data_offset` (i32, checked: overflow is `Malformed("trun")`) when trun flag `0x01` is set, else the end of the previous run of this `traf` (the base for the first run). ffmpeg restarts at the base for every `trun` without data_offset, so a `traf` with several such runs differs (a known difference, docs/parity.md).
@@ -568,7 +568,7 @@ Tables are not decoded into Vecs. At parse time each table's FullBox version and
 - **Run dts.** The `tfdt` for the first run of a `traf` that has one, else the end of the previous run of the track (any `moof`), starting at the sum of the `stts` deltas of `moov` (a track with no `moov` samples starts at 0). Past `i64::MAX` is `Malformed("trun")`.
 - **What parse keeps.** Per non-empty `trun`, a private record of about 80 bytes (start offset, first dts, the `Extent` of the per-sample records, count, flags, the resolved defaults, the description index), charged with the doubling pattern. Parse reads each record range once, to sum durations and sizes (O(1) memory, cancel every 4096 records); a run without per-sample duration and size costs O(1). `Track::sample_count` is the `moov` count plus the counts of all runs.
 - **Walks.** `samples`, `sync_samples` and `sync_sample_at` continue after the `moov` samples through the runs in file order. A walk has one more window (4 KiB at most, charged at the start) for the records of the current run. A fragment sample past the end of the file is `Truncated`. `sync_samples` takes the `stss`-listed (or all) `moov` samples, then the fragment samples whose flags say sync; `sync_sample_at` treats both kinds alike.
-- **Time.** A walk to the end visits every sample; runs may overlap, so a hostile file can make that long (only the cancel flag bounds it). The fuzz target walks to the end only for tracks with at most 65 536 samples.
+- **Time.** A walk to the end visits every sample; runs may overlap, so a hostile file can make that long: `samples` is bounded by the caller's `n` and the cancel flag only, while `sync_samples` and `sync_sample_at` stop with `Malformed("trun")` (or `Malformed("stsz")` for `moov` samples) at a sample number above the file length. The fuzz target runs those two without a sample-count skip.
 - **Kept raw.** `mfra`/`tfra`, `sidx`, `mehd`, `sdtp`, `senc` and the other boxes are kept raw and not used.
 - **Errors.** Tokens `mvex trex traf tfhd tfdt trun`.
 

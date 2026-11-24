@@ -561,6 +561,21 @@ impl<'a> Walk<'a> {
         })
     }
 
+    /// A scan that visits every sample (no `stss`, or fragment samples) stops at sample number
+    /// `n` above the file length: a sample is at least one byte, so a file of non-overlapping
+    /// samples has fewer samples than bytes. Chunk offsets or runs that repeat could otherwise
+    /// make the scan visit up to 2^32 samples of a small file.
+    pub(crate) fn check_overlap(&self, n: u64) -> Result<(), Error> {
+        if n > self.file_len {
+            return Err(Error::Malformed(if n > self.moov {
+                "trun"
+            } else {
+                "stsz"
+            }));
+        }
+        Ok(())
+    }
+
     /// True when the track lists its sync samples (`stss`).
     pub(crate) fn has_stss(&self) -> bool {
         self.sync.is_some()
@@ -789,12 +804,13 @@ impl Track {
     }
 
     /// The first `n` sync samples, in sample order: the samples of `moov` (all of them without
-    /// `stss`), then the fragment samples whose flags say sync. The result is charged for at most
-    /// `min(n, samples that can be sync)` samples.
+    /// `stss`), then the fragment samples whose flags say sync. Limits: `max_alloc` (the walk
+    /// windows, and the result Vec, charged as it grows), cancel as [`samples`](Self::samples).
     ///
     /// # Errors
     ///
-    /// As [`samples`](Self::samples), and [`Error::LimitExceeded`] for the result.
+    /// As [`samples`](Self::samples); [`Error::Malformed`] when a scan reaches a sample number
+    /// above the file length (overlapping samples); [`Error::LimitExceeded`] for the result.
     pub fn sync_samples<R: Read + Seek>(
         &self,
         mut r: R,
@@ -808,7 +824,7 @@ impl Track {
         let listed = self.st.stss.map_or(moov, |s| s.count.min(moov));
         let bound = listed.saturating_add(self.sample_count.saturating_sub(moov));
         let want = usize::try_from(bound).unwrap_or(usize::MAX).min(n);
-        let mut out = budget.vec::<Sample>(want)?;
+        let mut out = Vec::new();
         if want == 0 {
             return Ok(out);
         }
@@ -821,18 +837,20 @@ impl Track {
                     _ => break,
                 }
             } else if next <= moov {
+                w.check_overlap(next)?;
                 next
             } else {
                 break;
             };
-            out.push(w.sample(&mut r, v)?);
+            super::push(&budget, &mut out, w.sample(&mut r, v)?)?;
             next = next.saturating_add(1);
         }
         let mut v = moov.saturating_add(1);
         while out.len() < want && v <= self.sample_count {
+            w.check_overlap(v)?;
             let s = w.sample(&mut r, v)?;
             if s.sync {
-                out.push(s);
+                super::push(&budget, &mut out, s)?;
             }
             v = v.saturating_add(1);
         }
@@ -843,11 +861,13 @@ impl Track {
     /// timescale, no edit list applied); the lowest number among equals. When no sync sample
     /// has `pts <= t`, the lowest-numbered sync sample. `None` when the track has no sync
     /// sample. It visits every sync sample, because composition times are not monotone.
-    /// Fragment samples count like the samples of `moov`.
+    /// Fragment samples count like the samples of `moov`. Limits: `max_alloc` (the walk windows),
+    /// cancel as [`samples`](Self::samples).
     ///
     /// # Errors
     ///
-    /// As [`samples`](Self::samples).
+    /// As [`samples`](Self::samples); [`Error::Malformed`] (`stsz` or `trun`) when the scan
+    /// reaches a sample number above the file length, which only overlapping samples can do.
     pub fn sync_sample_at<R: Read + Seek>(
         &self,
         mut r: R,
@@ -880,6 +900,7 @@ impl Track {
                     _ => break,
                 }
             } else if next <= moov {
+                w.check_overlap(next)?;
                 next
             } else {
                 break;
@@ -888,6 +909,7 @@ impl Track {
             consider(w.sample(&mut r, v)?);
         }
         for v in moov.saturating_add(1)..=self.sample_count {
+            w.check_overlap(v)?;
             consider(w.sample(&mut r, v)?);
         }
         Ok(best.or(first))

@@ -291,12 +291,21 @@ impl Solver<'_, '_> {
         if it.data_reference_index != 0 {
             return Ok(Fill::Item(ItemError::Unsupported("data reference")));
         }
-        // Exactly one `iloc` reference from this item.
-        let mut found = span(fwd, it.id)
-            .iter()
-            .filter_map(|&(_, p)| refs.get(usize::try_from(p).ok()?))
-            .filter(|r| r.kind.0 == *b"iloc");
-        let (Some(r), None) = (found.next(), found.next()) else {
+        // Exactly one `iloc` reference from this item; each reference scanned counts as work.
+        let mut found = None;
+        for &(_, p) in span(fwd, it.id) {
+            tick(&mut self.steps, max)?;
+            let Some(r) = usize::try_from(p).ok().and_then(|p| refs.get(p)) else {
+                continue;
+            };
+            if r.kind.0 == *b"iloc" {
+                if found.is_some() {
+                    return Ok(Fill::Item(ItemError::Unsupported("construction method 2")));
+                }
+                found = Some(r);
+            }
+        }
+        let Some(r) = found else {
             return Ok(Fill::Item(ItemError::Unsupported("construction method 2")));
         };
         for (e, &index) in it.extents.iter().zip(&it.extent_index) {
@@ -417,6 +426,48 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let budget = Budget::new(&limits, &cancel);
         parse_bytes(b, &limits, &budget)
+    }
+
+    #[test]
+    fn method_2_reference_scan_counts_against_max_extents() {
+        use crate::FourCc;
+        use crate::boxes::Src;
+        let limits = Limits {
+            max_extents: 50,
+            ..Limits::default()
+        };
+        let cancel = AtomicBool::new(false);
+        let budget = Budget::new(&limits, &cancel);
+        let src = Src {
+            bytes: &[],
+            base: 0,
+            file_len: 0,
+        };
+        let ctx = Ctx::new(&src, &budget, &limits);
+        let mut locs = vec![IlocItem {
+            id: 1,
+            method: 2,
+            data_reference_index: 0,
+            base_offset: 0,
+            extents: vec![Extent {
+                offset: 0,
+                length: 1,
+            }],
+            extent_index: vec![1],
+        }];
+        // 1000 empty `cdsc` references from item 1: the scan alone exceeds the work cap.
+        let refs: Vec<Reference> = (0..1000)
+            .map(|_| Reference {
+                kind: FourCc(*b"cdsc"),
+                from: 1,
+                to: Vec::new(),
+            })
+            .collect();
+        let fwd: Vec<(u32, u32)> = (0..1000u32).map(|i| (1, i)).collect();
+        assert!(matches!(
+            resolve_all(&mut locs, &refs, &fwd, None, &ctx),
+            Err(Error::LimitExceeded(Limit::Extents))
+        ));
     }
 
     #[test]

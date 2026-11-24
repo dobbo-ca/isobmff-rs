@@ -12,9 +12,9 @@ before they happen (`Budget::vec`).
 | `max_boxes` | 1 000 000 | boxes visited in one call, all levels | max_children_per_box 100 (per box) |
 | `max_depth` | 32 | box nesting depth, top level = 0 | - |
 | `max_items` | 65 535 | `infe` entries, `iloc` items, `ipma` entries (each count) | max_items 1000 |
-| `max_properties` | 65 535 | `ipco` children; associations per call / 16 | max_children_per_box 100 |
+| `max_properties` | 65 535 | `ipco` children (`parse`/`read`), or sample entry children of all tracks together (`parse_movie`/`read_movie`); associations per call / 16 | max_children_per_box 100 |
 | `max_references` | 1 000 000 | all `to` ids of all `iref` boxes plus all `grpl` entity ids | max_items 1000 per iref box |
-| `max_extents` | 1 000 000 | iloc extents, all items together; also the work of resolving construction method 2 | max_iloc_extents_per_item 32 |
+| `max_extents` | 1 000 000 | iloc extents, all items together; also the work of resolving construction method 2 (every extent visited and every `iref` entry scanned for an `iloc` reference) | max_iloc_extents_per_item 32 |
 | `max_grid_tiles` | 65 536 | rows x columns of a grid; inputs of an iovl | max_number_of_tiles 4096 x 4096 |
 | `max_pixels` | 1 << 30 | ispe, grid and iovl width x height | max_image_size_pixels 32768 x 32768 |
 | `max_meta_bytes` | 64 MiB | size of the `meta` or `mini` box (and of the `ftyp` payload) that `read` copies; `parse` has no such cap | - |
@@ -37,16 +37,17 @@ before they happen (`Budget::vec`).
   after its parse); `parse_movie` works on the caller's bytes.
 - The sample tables are not decoded: a track costs the same memory whatever its sample count. A walk
   (`samples`, `sync_samples`, `sync_sample_at`) charges up to 7 windows of 4 KiB to `max_alloc` (the seventh
-  reads the `trun` records of the current fragment run), and `sync_samples` charges its result Vec for
-  `min(n, sync samples)` samples. The growing `Vec`s of the parse (tracks, entries, `other_boxes`, `trex`
+  reads the `trun` records of the current fragment run), and `sync_samples` charges its result Vec as it
+  grows (doubling). The growing `Vec`s of the parse (tracks, entries, `other_boxes`, `trex`
   list, `moof` headers, fragment runs of about 80 bytes each) use the doubling charge of `meta/mod.rs`.
-- `max_properties` counts the children of the sample entries of all tracks together.
-- A walk's time is bounded by the table bytes of the file, the file size (a sample is at least one byte
-  and must lie inside the file) and the cancel flag (checked at each window refill and every 4096
-  samples). Fragment runs may overlap in the file, so the number of fragment samples is bounded by
-  the run counts (a `trun` with no per-sample size needs a non-zero default size) and not by the file
-  size; only the cancel flag bounds a walk to the end of such a file. Parsing sums each `trun` once,
-  checking the cancel flag every 4096 records.
+- `max_properties` counts the children of the sample entries of all tracks together (`parse_movie`,
+  `read_movie`); `parse` and `read` count `ipco` children.
+- Samples may overlap (chunk offsets may repeat, fragment runs may overlap), so the file size does not
+  bound the sample count. `sync_sample_at` (the `moov` loop without `stss`, and the fragment loop) and
+  the fragment loop and the `moov` loop without `stss` of `sync_samples` stop with `Malformed("stsz")` or
+  `Malformed("trun")` at a sample number above the file length (a sample is at least one byte). `samples`
+  is bounded by the caller's `n` and the cancel flag only (checked at each window refill and every
+  4096 samples). Parsing sums each `trun` once, checking the cancel flag every 4096 records.
 
 ## Compared with libheif
 

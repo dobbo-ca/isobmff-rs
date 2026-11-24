@@ -937,6 +937,60 @@ fn trun_cto_is_signed_in_both_versions() {
 }
 
 #[test]
+fn traf_without_trex_or_tfhd_or_with_late_tfhd_is_lenient() {
+    // Track 1 has no trex: its traf is kept whole. A traf without tfhd too. A traf whose tfhd
+    // comes after another box is read, and that box is kept on the track.
+    let f = frag_file(2, &[trex(2, 1, 10, 4, 0)], |at, data| {
+        let off = (data - at) as u32;
+        moof(&[
+            traf(&[tfhd(1, 0x2_0000, &[]), trun(0, 0x1, 1, &[off], &[])]),
+            traf(&[]),
+            traf(&[
+                bx(b"senc", &[0; 4]),
+                tfhd(2, 0x2_0000, &[]),
+                trun(0, 0x1, 1, &[off], &[]),
+            ]),
+        ])
+    });
+    let m = parse(&f);
+    assert_eq!(m.tracks[0].sample_count, 0);
+    assert_eq!(m.tracks[1].sample_count, 1);
+    assert_eq!(
+        m.other_boxes
+            .iter()
+            .filter(|(k, _)| k.0 == *b"traf")
+            .count(),
+        2
+    );
+    assert!(m.tracks[1].other_boxes.iter().any(|(k, _)| k.0 == *b"senc"));
+}
+
+#[test]
+fn boxes_before_the_tfhd_count_once() {
+    // The smallest `max_boxes` that parses grows by exactly the number of extra boxes.
+    let least = |extra: usize| {
+        let f = frag_file(1, &[trex(1, 1, 10, 4, 0)], |at, data| {
+            let off = (data - at) as u32;
+            let mut kids = vec![bx(b"free", &[0; 4]); extra];
+            kids.push(tfhd(1, 0x2_0000, &[]));
+            kids.push(trun(0, 0x1, 1, &[off], &[]));
+            moof(&[traf(&kids)])
+        });
+        let c = AtomicBool::new(false);
+        (1..200)
+            .find(|&n| {
+                let l = Limits {
+                    max_boxes: n,
+                    ..Limits::default()
+                };
+                parse_movie(&f, &l, &c).is_ok()
+            })
+            .unwrap()
+    };
+    assert_eq!(least(10), least(0) + 10);
+}
+
+#[test]
 fn unknown_track_traf_is_kept_raw() {
     let f = frag_file(1, &[trex(1, 1, 10, 4, 0)], |at, data| {
         let off = (data - at) as u32;
@@ -1029,11 +1083,6 @@ fn fragment_errors() {
             ]),
             Error::Malformed("mvex"),
         ),
-        // A traf of a track without trex.
-        (
-            frag_file(1, &[], |_, _| moof(&[traf(&[id(1, 0), run()])])),
-            Error::Malformed("trex"),
-        ),
         (
             frag_file(1, &[trex(1, 1, 1, 1, 0), trex(1, 1, 1, 1, 0)], |_, _| {
                 moof(&[])
@@ -1053,9 +1102,8 @@ fn fragment_errors() {
             one_moof(vec![traf(&[tfhd(0, 0, &[])])]),
             Error::Malformed("tfhd"),
         ),
-        // tfhd must be the first child.
+        // A trun before the tfhd.
         (one_moof(vec![traf(&[run()])]), Error::Malformed("traf")),
-        (one_moof(vec![traf(&[])]), Error::Malformed("traf")),
         // A count that its records cannot hold.
         (
             one_moof(vec![traf(&[id(1, 0), trun(0, 0x200, 1000, &[], &[1])])]),
@@ -1256,4 +1304,34 @@ fn fuzz_seed_is_a_fragmented_file() {
         assert_eq!(spans(&s), [(468, 4), (472, 4)]);
         assert_eq!(s.iter().map(|s| s.dts).collect::<Vec<_>>(), [100, 110]);
     }
+}
+
+#[test]
+fn sync_sample_at_stops_on_overlapping_chunks() {
+    // 8 chunks at the same offset, 1000 one-byte samples each: 8000 samples in a file of about
+    // 1600 bytes (mdat 1000, so every chunk fits). Without `stss` every sample is sync, so the
+    // scan stops at sample number file_len + 1 instead of visiting all of them (with a 32-bit
+    // count, 4e9 of them). `sync_samples` stops the same way.
+    let tables = [
+        stts(&[(8000, 1)]),
+        stsc(&[(1, 1000, 1)]),
+        stsz_const(1, 8000),
+        stco(&[28; 8]),
+    ];
+    let f = mp4(&moov(&[Trak::video(1, &tables).build()], &[]), 1000);
+    let m = parse(&f);
+    let c = AtomicBool::new(false);
+    let l = Limits::default();
+    assert_eq!(
+        m.tracks[0]
+            .sync_sample_at(Cursor::new(&f[..]), 0, &l, &c)
+            .err(),
+        Some(Error::Malformed("stsz"))
+    );
+    assert_eq!(
+        m.tracks[0]
+            .sync_samples(Cursor::new(&f[..]), usize::MAX, &l, &c)
+            .err(),
+        Some(Error::Malformed("stsz"))
+    );
 }

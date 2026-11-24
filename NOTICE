@@ -2,7 +2,7 @@ isobmff-rs
 Copyright 2026 Chris Dobbyn
 
 isobmff-rs is a new crate, not a port of one repository. It parses the ISO base media file
-format (HEIF, HEIC, AVIF) from the published layouts of ISO/IEC 14496-12, ISO/IEC 23008-12, the
+format (HEIF, HEIC, AVIF, and the tracks of MP4/MOV/3GP) from the published layouts of ISO/IEC 14496-12, ISO/IEC 23008-12, the
 AVIF and AV1-ISOBMFF specifications, and ISO/IEC 21496-1. docs/design.md describes the design.
 
 Third-party code and data
@@ -55,8 +55,16 @@ Third-party code and data
    linked, and libheif is
    not a dependency of the crate or part of anything it ships.
 
-3. libultrahdr (MIT or Apache-2.0): the common-denominator layout of the ISO 21496-1 payload
+3. FFmpeg 5.1.x (LGPL-2.1-or-later, some parts GPL), ffmpeg.org, Debian bookworm package.
+
+   Used only as a CI oracle (the ffprobe binary, run by tests/parity/ffprobe-tracks.sh) and as a
+   design reference for the MP4/MOV rules in src/movie (libavformat/mov.c: the implicit base
+   offset of a `traf`, the signed `ctts`, the repeated last `stts` delta, which sample
+   descriptions it keeps); written from the behaviour, no FFmpeg code is copied or linked, and
+   FFmpeg is not a dependency of the crate or part of anything it ships.
+
+4. libultrahdr (MIT or Apache-2.0): the common-denominator layout of the ISO 21496-1 payload
    (flag bit 3) was read from lib/src/gainmapmetadata.cpp; no code is copied.
 
-4. Test corpus (fetched in CI, never stored in this repository): the sources and licences are
+5. Test corpus (fetched in CI, never stored in this repository): the sources and licences are
    listed in tests/parity/corpus.toml.
