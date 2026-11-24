@@ -1072,7 +1072,7 @@ fn mp4_text<R: Read + Seek>(
         let dep = |s: &isobmff::Sample| s.sync && s.flags.is_some_and(|f| f & 0x0100_0000 != 0);
         let any_dep = all.iter().any(dep);
         let first = all.first().map_or(0, |s| s.dts);
-        // With a complete moof index ffmpeg cuts a packet at the end of the top-level box that
+        // ffmpeg cuts a packet at the end of the top-level box that
         // holds its first byte (mov.c:7840-7846, 8775-8777), so the size of a fragment sample
         // that runs past that box differs.
         let top = boxes_in(data, 0, data.len());
