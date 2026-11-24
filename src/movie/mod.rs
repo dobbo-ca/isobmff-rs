@@ -39,8 +39,8 @@ pub struct Movie {
     /// Every top-level box, `moov` child and `moof` child that is not parsed (`mdat`, `free`,
     /// `udta`, `meta`, `mvex`, `sidx`, `mfhd`, a `traf` of a track that is not in `moov`, `uuid`,
     /// ...), type and whole-box range, in file order, except that the children of the `moof`
-    /// boxes come last (they are parsed after `moov`). The first `ftyp` and the `moov` and `moof`
-    /// boxes themselves are not listed.
+    /// boxes come last (they are parsed after `moov`). The first `ftyp`, the first `moov` and the
+    /// `moof` boxes themselves are not listed (a second `moov` is).
     pub other_boxes: Vec<(FourCc, Extent)>,
     /// Boxes visited and the deepest nesting.
     pub stats: Stats,
@@ -194,17 +194,15 @@ struct Top {
 
 impl Top {
     /// Sorts `h`: the first `ftyp` and the first `moov` are for the caller to parse, a `moof` is
-    /// noted for later; anything else is kept as a range. A second `moov` is `Malformed`.
+    /// noted for later; anything else is kept as a range. A second `moov` is kept as a range too
+    /// (ffmpeg parses the first and skips a duplicate).
     fn note(&mut self, budget: &Budget<'_>, h: &BoxHeader) -> Result<Kind, Error> {
         match &h.kind.0 {
             b"ftyp" if !self.ftyp_seen => {
                 self.ftyp_seen = true;
                 Ok(Kind::Ftyp)
             }
-            b"moov" => {
-                if self.moov_seen {
-                    return Err(Error::Malformed("moov"));
-                }
+            b"moov" if !self.moov_seen => {
                 self.moov_seen = true;
                 Ok(Kind::Moov)
             }
@@ -251,7 +249,7 @@ fn first_box_ok(kind: Option<&[u8]>) -> bool {
 /// [`Error::UnknownFormat`] when the first box is not one of `ftyp moov mdat free skip wide
 /// pnot`; [`Error::NoMoov`] without a `moov`; [`Error::Truncated`] when a top-level box before
 /// `moov` runs past the end of `data` (after `moov`, a damaged tail ends the walk);
-/// [`Error::Unsupported`] for `cmov`; [`Error::Malformed`] for an invalid box (two `moov`, a
+/// [`Error::Unsupported`] for `cmov`; [`Error::Malformed`] for an invalid box (a
 /// missing or duplicate required box, a table whose count does not fit its box, a `moof` without
 /// `mvex`, a `trun` before its `tfhd` or a `trun` whose records do not fit its box, ...);
 /// [`Error::LimitExceeded`]; [`Error::OutOfMemory`]; [`Error::Cancelled`].
@@ -957,9 +955,8 @@ mod tests {
         );
         assert_eq!(parse_movie(&[], &l, &c).err(), Some(Error::UnknownFormat));
         let two = [bx(b"moov", &[]), bx(b"moov", &[])].concat();
-        assert_eq!(
-            parse_movie(&two, &l, &c).err(),
-            Some(Error::Malformed("moov"))
-        );
+        let m = parse_movie(&two, &l, &c).unwrap();
+        assert_eq!(m.other_boxes.len(), 1);
+        assert_eq!(m.other_boxes[0].0.0, *b"moov");
     }
 }

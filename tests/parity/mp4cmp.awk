@@ -1,4 +1,4 @@
-# mp4cmp.awk: gawk -M -v fferr=0|1 [-v perr=1] -f mp4cmp.awk <tracks.txt of oracle mp4> <output of ffprobe-tracks.sh>
+# mp4cmp.awk: gawk -M -v fferr=0|1 [-v perr=1 -v ffrc=<ffprobe exit code>] -f mp4cmp.awk <tracks.txt of oracle mp4> <output of ffprobe-tracks.sh>
 # Prints two lines (ours, ffprobe) per mismatch and nothing when the two agree (docs/parity.md,
 # gate 5). Lines are keyed by (kind, track id, sample number or probe number). Only tracks that
 # have an `s` or `e` line in ours are compared. Fields 4 and up must be equal, except where ours
@@ -7,8 +7,8 @@
 # output may be a prefix), only keys on both sides are compared and the `at` lines are skipped. Where
 # ours has an `e` line and fferr is 0, ffprobe must stop at the same sample: a key of ffprobe past our
 # last sample is a mismatch (only the `at` lines of that track are skipped, ours has none). perr=1:
-# ours failed to parse the file (tracks.txt is `error <class>`); with fferr 0, any packet of ffprobe is
-# a mismatch.
+# ours failed to parse the file (tracks.txt is `error <class>`); when ffprobe exited 0 (ffrc 0), whatever it
+# printed on stderr, any packet of ffprobe is a mismatch.
 BEGIN { PROCINFO["sorted_in"] = "@ind_str_asc" }
 function mismatch(k) {
   print "ours:    " ((k in o) ? o[k] : "(missing)")
@@ -24,7 +24,7 @@ FNR == NR {
 perr && $1 == "s" { np++ }
 END {
   if (perr) {
-    if (!fferr && np > 0) { print "ours:    parse error"; print "ffprobe: " np " packets" }
+    if (ffrc == 0 && np > 0) { print "ours:    parse error"; print "ffprobe: " np " packets" }
     exit
   }
   for (k in o) keys[k] = 1

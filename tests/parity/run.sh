@@ -167,11 +167,12 @@ mp4_cmp() {
   ft=$W/mff/$1
   sh tests/parity/ffprobe-tracks.sh "$W/mp4in/$1" "$ft" > "$ft.txt" 2> /dev/null
   fe=0
-  [ "$(cat "$ft.rc" 2> /dev/null)" = 0 ] || fe=1
+  rc=$(cat "$ft.rc" 2> /dev/null)
+  [ "$rc" = 0 ] || fe=1
   [ ! -s "$ft.err" ] || fe=1
   perr=0
   ! grep -qE '^error (malformed|unsupported)$' "$W/m1/$1/tracks.txt" 2> /dev/null || perr=1
-  gawk -M -v fferr=$fe -v perr=$perr -f tests/parity/mp4cmp.awk "$W/m1/$1/tracks.txt" "$ft.txt" > $W/d1 2>&1
+  gawk -M -v fferr=$fe -v perr=$perr -v ffrc="${rc:-1}" -f tests/parity/mp4cmp.awk "$W/m1/$1/tracks.txt" "$ft.txt" > $W/d1 2>&1
 }
 
 # mp4_corpus: gate 5a and the count of gate 5d. Every corpus file whose isobmff-rs tracks.txt has an

@@ -195,7 +195,8 @@ fn push_charged(budget: &Budget<'_>, v: &mut Vec<Extent>, e: Extent) -> Result<(
     Ok(())
 }
 
-/// Counts one unit of work (an extent of a method-2 item or a source extent visited) against
+/// Counts one unit of work (an extent of a method-2 item, a source extent visited or an `iref`
+/// entry scanned for the `iloc` reference of an item) against
 /// `max_extents`.
 fn tick(steps: &mut usize, max: usize) -> Result<(), Error> {
     *steps = steps.saturating_add(1);

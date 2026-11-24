@@ -396,9 +396,30 @@ fn structure_errors() {
     // The first box.
     assert_eq!(parse_err(&bx(b"meta", &[0; 8])), Error::UnknownFormat);
     assert_eq!(parse_err(&[]), Error::UnknownFormat);
-    // Two moov boxes.
-    let m = moov(&[], &[]);
-    assert_eq!(parse_err(&cat(&[&ftyp, &m, &m])), Error::Malformed("moov"));
+    // Two moov boxes: the first is parsed, the second is kept raw (as ffmpeg skips it).
+    let one = file(&[
+        stts(&[(4, 10)]),
+        stsc(&[(1, 2, 1)]),
+        stsz_const(3, 4),
+        stco(&[28, 128]),
+    ]);
+    let second = moov(&[], &[]);
+    let two = cat(&[&one, &second]);
+    let m = parse(&two);
+    assert_eq!(m.tracks.len(), 1);
+    assert_eq!(m.tracks[0].sample_count, 4);
+    let (k, e) = m.other_boxes.last().unwrap();
+    assert_eq!(k.0, *b"moov");
+    assert_eq!(isobmff::Heif::slice(&two, *e).unwrap(), &second[..]);
+    assert_eq!(
+        read_movie(
+            Cursor::new(&two[..]),
+            &Limits::default(),
+            &AtomicBool::new(false)
+        )
+        .unwrap(),
+        m
+    );
     // cmov.
     assert_eq!(
         parse_err(&cat(&[&ftyp, &moov(&[], &[bx(b"cmov", &[0; 8])])])),
@@ -756,10 +777,8 @@ fn read_equals_parse_and_walks_through_a_reader() {
     }
     // read and parse fail alike.
     let ftyp = bx(b"ftyp", b"isom\0\0\0\0isom");
-    let m = moov(&[], &[]);
     let cases = [
         (ftyp.clone(), Error::NoMoov),
-        (cat(&[&ftyp, &m, &m]), Error::Malformed("moov")),
         (bx(b"meta", &[0; 8]), Error::UnknownFormat),
         (Vec::new(), Error::UnknownFormat),
         (f_cut(), Error::Truncated),
@@ -1316,7 +1335,7 @@ fn fuzz_seed_is_a_fragmented_file() {
 fn sync_sample_at_stops_on_overlapping_chunks() {
     // 8 chunks at the same offset, 1000 one-byte samples each: 8000 samples in a file of about
     // 1600 bytes (mdat 1000, so every chunk fits). Without `stss` every sample is sync, so the
-    // scan stops at sample number file_len + 1 instead of visiting all of them (with a 32-bit
+    // scan stops at sample number 2 * file_len + 1 instead of visiting all of them (with a 32-bit
     // count, 4e9 of them). `sync_samples` stops the same way.
     let tables = [
         stts(&[(8000, 1)]),
@@ -1340,4 +1359,43 @@ fn sync_sample_at_stops_on_overlapping_chunks() {
             .err(),
         Some(Error::Malformed("stsz"))
     );
+}
+
+#[test]
+fn samples_stops_on_overlapping_chunks() {
+    // The same file: the iterator ends with the same error instead of yielding 8000 samples
+    // (with a 32-bit count, 4e9). It yields 2 * file_len samples, then `Malformed("stsz")`.
+    let tables = [
+        stts(&[(8000, 1)]),
+        stsc(&[(1, 1000, 1)]),
+        stsz_const(1, 8000),
+        stco(&[28; 8]),
+    ];
+    let f = mp4(&moov(&[Trak::video(1, &tables).build()], &[]), 1000);
+    let m = parse(&f);
+    let w = walk(&m.tracks[0], &f);
+    let limit = 2 * f.len();
+    assert!(limit < 8000);
+    assert_eq!(w.len(), limit + 1);
+    assert!(w[..limit].iter().all(Result::is_ok));
+    assert_eq!(w[limit], Err(Error::Malformed("stsz")));
+}
+
+#[test]
+fn zero_size_stz2_samples_are_not_overlap() {
+    // 2000 samples of 0 bytes (4-bit stz2: 1000 table bytes) in a file of under 2000 bytes: more
+    // samples than bytes without any overlap. All three walks accept them.
+    let tables = [
+        stts(&[(2000, 1)]),
+        stsc(&[(1, 2000, 1)]),
+        stz2(4, &[0; 2000]),
+        stco(&[28]),
+    ];
+    let f = mp4(&moov(&[Trak::video(1, &tables).build()], &[]), 8);
+    assert!(f.len() < 2000);
+    let m = parse(&f);
+    let t = &m.tracks[0];
+    assert_eq!(samples(t, &f).len(), 2000);
+    assert_eq!(sync(t, &f, usize::MAX).unwrap().len(), 2000);
+    assert_eq!(at(t, &f, i64::MAX), Some(2000));
 }

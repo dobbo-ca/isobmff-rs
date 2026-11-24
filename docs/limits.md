@@ -43,11 +43,12 @@ before they happen (`Budget::vec`).
 - `max_properties` counts the children of the sample entries of all tracks together (`parse_movie`,
   `read_movie`); `parse` and `read` count `ipco` children.
 - Samples may overlap (chunk offsets may repeat, fragment runs may overlap), so the file size does not
-  bound the sample count. `sync_sample_at` (the `moov` loop without `stss`, and the fragment loop) and
+  bound the sample count. The `samples` iterator, `sync_sample_at` (the `moov` loop without `stss`, and the fragment loop) and
   the fragment loop and the `moov` loop without `stss` of `sync_samples` stop with `Malformed("stsz")` or
-  `Malformed("trun")` at a sample number above the file length (a sample is at least one byte). `samples`
-  is bounded by the caller's `n` and the cancel flag only (checked at each window refill and every
-  4096 samples). Parsing sums each `trun` once, checking the cancel flag every 4096 records.
+  `Malformed("trun")` at a sample number above twice the file length (a sample costs at least half a byte of table, a 4-bit `stz2`
+  field; a constant-size `stsz` that counts decoded audio samples, as in QuickTime v1 sound, can exceed it). The cancel flag is
+  checked at each window refill and every 4096 samples. Parsing sums each `trun` once, checking the
+  cancel flag every 4096 records.
 
 ## Compared with libheif
 
