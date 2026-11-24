@@ -380,6 +380,14 @@ pub struct Image {
 
 isobmff-rs finds keyframes in MP4, MOV, 3GP and AVIS image sequences, so that hevc-rs and av1-rs can decode one and Drive can build a thumbnail. For a track it gives the codec configuration and the byte ranges of its first N sync samples, or of the sync sample nearest a time. It decodes no samples. `parse` and `read` (the HEIF item graph) are unchanged: `moov` stays "noted" there. A caller who wants both the item graph and the tracks of an AVIS file calls both. It reads `moov` and the movie fragments (`moof`) of fragmented files ("Fragmented MP4", below); `mvex` sets `Movie::fragmented`.
 
+```rust
+// The byte ranges of the first 3 keyframes of the video track.
+let movie = isobmff::parse_movie(&file, &limits, &cancel)?;   // or isobmff::read_movie(reader, ..)
+let track = movie.video_track().ok_or(Error::Unsupported("no video track"))?;
+let config = track.entries.first().and_then(|e| e.config()); // hvcC / av1C / avcC / vvcC
+let first = track.sync_samples(std::io::Cursor::new(&file[..]), 3, &limits, &cancel)?;
+```
+
 ```
 src/movie/
   mod.rs      Movie, Track, SampleEntry, Edit, Sample, parse_movie, read_movie, the moov/trak/mdia/minf/stbl/stsd parse

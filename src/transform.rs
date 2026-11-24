@@ -130,20 +130,30 @@ fn step_size(w: u32, h: u32, t: &Transform) -> Result<(u32, u32), Error> {
 
 /// The size [`apply_transforms`] gives for an image of `width` x `height`, without planes. The
 /// same rules: each `clap` is cropped on the size after the transforms before it, with
-/// [`Clap::crop_rounded`](crate::Clap::crop_rounded); `irot` 90 and 270 swap the sides.
+/// [`Clap::crop_rounded`](crate::Clap::crop_rounded); `irot` 90 and 270 swap the sides. Both the
+/// input size and the result are checked against `limits.max_pixels`.
 ///
 /// # Errors
 ///
 /// `Malformed("clap")` for a `clap` that [`Clap::crop_rounded`](crate::Clap::crop_rounded)
-/// rejects, `Malformed("irot")` for an angle that is not 0, 90, 180 or 270.
+/// rejects, `Malformed("irot")` for an angle that is not 0, 90, 180 or 270,
+/// `LimitExceeded(Pixels)` when the input or the result has more than `limits.max_pixels`.
 pub fn transformed_size(
     width: u32,
     height: u32,
     transforms: &[Transform],
+    limits: &Limits,
 ) -> Result<(u32, u32), Error> {
+    let over = |w: u32, h: u32| u64::from(w).saturating_mul(u64::from(h)) > limits.max_pixels;
+    if over(width, height) {
+        return Err(Error::LimitExceeded(Limit::Pixels));
+    }
     let (mut w, mut h) = (width, height);
     for t in transforms {
         (w, h) = step_size(w, h, t)?;
+    }
+    if over(w, h) {
+        return Err(Error::LimitExceeded(Limit::Pixels));
     }
     Ok((w, h))
 }
@@ -163,17 +173,20 @@ pub fn transformed_size(
 ///   copying each sample into two columns (trimmed to the luma width) as they are rotated, and the
 ///   result is [`Chroma::Yuv444`]. For 4:2:0 and an odd side, each plane is rotated or mirrored at
 ///   its own size, so the chroma keeps its `ceil` size.
-/// - `limits.max_pixels` is checked against the output size, before any work (not for an empty
-///   list). Every new buffer is charged to `limits.max_alloc` before it is allocated; a buffer
-///   that a later step replaces is given back after that step. The input planes are the caller's
-///   and are not charged. The cancel flag is checked between steps and at least every 64 rows.
-///   Nothing is spawned.
+/// - `limits.max_pixels` is checked against the input size and the output size, before any work
+///   (not for an empty list). Every new buffer, the plane list included, is charged to
+///   `limits.max_alloc` before it is allocated; a buffer that a later step replaces is given back
+///   after that step. The input planes are the caller's and are not charged. The cancel flag is
+///   checked between steps and at least every 64 rows. Nothing is spawned.
+/// - A second `irot`, `imir` or `clap` in the list is applied like the first. libheif rejects a
+///   second one of a kind (also with `ignore_transformations`); this is a known difference, so
+///   that [`Image::transforms`](crate::Image::transforms) can keep every property as stored.
 ///
 /// # Errors
 ///
 /// `Malformed("planes")` when `planes` do not have the layout of [`Planes`];
-/// `Malformed("clap")` or `Malformed("irot")` as for [`transformed_size`];
-/// `LimitExceeded(Pixels)`, `LimitExceeded(Alloc)`, `OutOfMemory`, `Cancelled`.
+/// `Malformed("clap")`, `Malformed("irot")` and `LimitExceeded(Pixels)` as for
+/// [`transformed_size`]; `LimitExceeded(Alloc)`, `OutOfMemory`, `Cancelled`.
 pub fn apply_transforms(
     mut planes: Planes,
     transforms: &[Transform],
@@ -184,10 +197,7 @@ pub fn apply_transforms(
     if transforms.is_empty() {
         return Ok(planes);
     }
-    let (w, h) = transformed_size(planes.width, planes.height, transforms)?;
-    if u64::from(w).saturating_mul(u64::from(h)) > limits.max_pixels {
-        return Err(Error::LimitExceeded(Limit::Pixels));
-    }
+    transformed_size(planes.width, planes.height, transforms, limits)?;
     let budget = Budget::new(limits, cancel);
     // Bytes charged for the buffers that `planes` holds now (the caller's input is not charged).
     let mut owned = 0usize;
@@ -216,8 +226,8 @@ pub fn apply_transforms(
 
 /// Crops every plane. Returns the bytes charged for the new planes.
 fn crop(p: &mut Planes, r: Rect, b: &Budget<'_>) -> Result<Option<usize>, Error> {
-    let mut out = Vec::with_capacity(p.planes.len());
-    let mut bytes = 0usize;
+    let mut out = b.vec::<Plane>(p.planes.len())?;
+    let mut bytes = p.planes.len().saturating_mul(size_of::<Plane>());
     for (i, pl) in p.planes.iter().enumerate() {
         let (sx, sy) = sampling(p.chroma, i);
         let (x, y) = (us(fdiv(r.x, sx)), us(fdiv(r.y, sy)));
@@ -280,8 +290,8 @@ fn rotate(p: &mut Planes, deg: u16, b: &Budget<'_>) -> Result<Option<usize>, Err
         90 | 270 => {
             let to444 = p.chroma == Chroma::Yuv422;
             let ccw90 = deg == 90;
-            let mut out = Vec::with_capacity(p.planes.len());
-            let mut bytes = 0usize;
+            let mut out = b.vec::<Plane>(p.planes.len())?;
+            let mut bytes = p.planes.len().saturating_mul(size_of::<Plane>());
             for (i, pl) in p.planes.iter().enumerate() {
                 // A 4:2:2 chroma plane is read as if each sample were two columns wide.
                 let rep = to444 && (i == 1 || i == 2);
@@ -414,8 +424,9 @@ fn mirror_plane<T>(v: &mut [T], w: usize, axis: Axis, b: &Budget<'_>) -> Result<
             let pairs = top
                 .chunks_exact_mut(w)
                 .zip(bottom.chunks_exact_mut(w).rev());
+            // Each pair swaps two rows, so 32 pairs are 64 rows.
             for (i, (a, c)) in pairs.enumerate() {
-                if i & 63 == 0 {
+                if i & 31 == 0 {
                     b.check_cancel()?;
                 }
                 a.swap_with_slice(c);
@@ -917,7 +928,7 @@ mod tests {
                     }),
                 });
             }
-            let size = transformed_size(w, h, &list);
+            let size = transformed_size(w, h, &list, &lim());
             let out = run(
                 mk(w, h, chroma, rng.below(2) == 0, rng.below(2) == 0),
                 &list,

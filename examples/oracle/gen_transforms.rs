@@ -239,9 +239,10 @@ struct Spec {
     depth: u8,
     tfs: &'static [Tf],
     aux: Option<&'static str>,
-    /// Chroma constant along each row, so libheif's bilinear 4:2:2 upsampling equals replication
-    /// and the chroma of a rotated 4:2:2 image can be compared exactly (even widths only).
-    rowconst: bool,
+    /// Chroma that changes by at most 1 between adjacent columns (a random walk per row), so
+    /// libheif's bilinear 4:2:2 upsampling, (3a + b + 2) / 4 and (a + 3b + 2) / 4, equals
+    /// replication and the chroma of a rotated 4:2:2 image can be compared exactly (even widths only).
+    smooth: bool,
 }
 
 fn pixels(rng: &mut Rng, n: usize, depth: u8, out: &mut Vec<u8>) {
@@ -263,12 +264,13 @@ fn item(s: &Spec, rng: &mut Rng) -> (Vec<u8>, Vec<(Vec<u8>, bool)>) {
     let (cw, chh) = s.ch.chroma_dims(w, h);
     let mut data = Vec::new();
     pixels(rng, w * h, s.depth, &mut data);
-    if s.rowconst {
+    if s.smooth {
+        // per chroma row: a start in 64..192, then steps of -1, 0 or +1 (8 bits, so no clamping)
         for _ in 0..chh * 2 {
-            let mut one = Vec::new();
-            pixels(rng, 1, s.depth, &mut one);
+            let mut v = 64 + (rng.step() >> 16) % 128;
             for _ in 0..cw {
-                data.extend_from_slice(&one);
+                data.push(v as u8);
+                v = (v + (rng.step() >> 16) % 3).saturating_sub(1);
             }
         }
     } else {
@@ -429,7 +431,7 @@ impl Out<'_> {
         self.n += 1;
         if specs
             .first()
-            .is_some_and(|m| !m.rowconst && converts(m.ch, m.w, m.h, m.tfs) == Some(true))
+            .is_some_and(|m| !m.smooth && converts(m.ch, m.w, m.h, m.tfs) == Some(true))
         {
             let _ = writeln!(self.known, "{name}.heic\t1\tlibheif-444");
         }
@@ -445,7 +447,7 @@ fn main_spec(ch: Ch, depth: u8, w: u32, h: u32, tfs: &'static [Tf]) -> Spec {
         depth,
         tfs,
         aux: None,
-        rowconst: false,
+        smooth: false,
     }
 }
 
@@ -458,7 +460,7 @@ fn aux_spec(w: u32, h: u32, tfs: &'static [Tf], urn: &'static str) -> Spec {
         depth: 8,
         tfs,
         aux: Some(urn),
-        rowconst: false,
+        smooth: false,
     }
 }
 
@@ -473,7 +475,7 @@ pub fn run_gen(args: &[String]) {
     let chs = [Ch::C400, Ch::C420, Ch::C422, Ch::C444];
     // geometry sweep: every chroma format, size and transform set at 8 bits
     for ch in chs {
-        for (w, h) in [(7, 5), (16, 12), (33, 18)] {
+        for (w, h) in [(7, 5), (16, 12), (16, 11), (33, 18)] {
             for (sn, tfs) in SETS {
                 let name = format!("unci_{}_d8_{w}x{h}_{sn}", ch.name());
                 o.add(&name, &[main_spec(ch, 8, w, h, tfs)]);
@@ -490,27 +492,28 @@ pub fn run_gen(args: &[String]) {
         ("fracneg", &[Clap(Raw(&[8, 1, 6, 1, -1, 2, -1, 2]))]),
     ];
     for ch in [Ch::C400, Ch::C444] {
-        for (w, h) in [(7, 5), (16, 12), (33, 18)] {
+        for (w, h) in [(7, 5), (16, 12), (16, 11), (33, 18)] {
             for (sn, tfs) in FRAC {
                 let name = format!("unci_{}_d8_{w}x{h}_{sn}", ch.name());
                 o.add(&name, &[main_spec(ch, 8, w, h, tfs)]);
             }
         }
     }
-    // 4:2:2 rotated by 90 and 270: the chroma becomes 4:4:4 by replication; row-constant chroma
-    // makes libheif's bilinear conversion identical, so the chroma planes are compared exactly
+    // 4:2:2 rotated by 90 and 270: the chroma becomes 4:4:4 by replication; smooth chroma
+    // changing by at most 1 between columns makes libheif's bilinear conversion identical, so the
+    // chroma planes are compared exactly and a wrong sample choice is caught
     for sn in ["rot90", "rot270"] {
-        for (w, h) in [(16, 12), (34, 18)] {
-            let name = format!("unci_c422_rowconst_{w}x{h}_{sn}");
+        for (w, h) in [(16, 12), (34, 18), (16, 11)] {
+            let name = format!("unci_c422_smooth_{w}x{h}_{sn}");
             let mut m = main_spec(Ch::C422, 8, w, h, set(sn));
-            m.rowconst = true;
+            m.smooth = true;
             o.add(&name, &[m]);
         }
     }
     // depth sweep: 10, 12 and 16 bits
     for depth in [10u8, 12, 16] {
         for ch in chs {
-            for (w, h) in [(7, 5), (16, 12)] {
+            for (w, h) in [(7, 5), (16, 12), (16, 11)] {
                 for sn in ["rot90", "clapoddxy", "mirlr", "clapoddx-rot90-mirlr"] {
                     let name = format!("unci_{}_d{depth}_{w}x{h}_{sn}", ch.name());
                     o.add(&name, &[main_spec(ch, depth, w, h, set(sn))]);
@@ -553,6 +556,20 @@ pub fn run_gen(args: &[String]) {
                 &[
                     main_spec(ch, 8, 12, 12, set(sn)),
                     aux_spec(12, 12, set("none"), ALPHA_URN),
+                ],
+            );
+        }
+    }
+    // alpha at another bit depth than the main image: 10-bit main, 8-bit alpha (planes of 2 and 1
+    // bytes per sample in one image)
+    for ch in [Ch::C420, Ch::C444] {
+        for sn in ["rot90", "clapoddxy"] {
+            let name = format!("unci_alpha_{}_d10main_{sn}", ch.name());
+            o.add(
+                &name,
+                &[
+                    main_spec(ch, 10, 16, 12, set(sn)),
+                    aux_spec(16, 12, set(sn), ALPHA_URN),
                 ],
             );
         }

@@ -1158,15 +1158,21 @@ mod tests {
         let t = vec![Transform::Clap(clap(2, 2, 0)), Transform::Rotate(90)];
         let i = image(5, 5, t.clone());
         assert_eq!(i.display_size(), Some((2, 2)));
-        assert_eq!(crate::transformed_size(5, 5, &t), Ok((2, 2)));
+        assert_eq!(
+            crate::transformed_size(5, 5, &t, &crate::Limits::default()),
+            Ok((2, 2))
+        );
         // Partly outside: clamped, 45 wide.
         let t = vec![Transform::Clap(clap(50, 50, -30))];
         assert_eq!(image(100, 100, t.clone()).display_size(), Some((45, 50)));
-        assert_eq!(crate::transformed_size(100, 100, &t), Ok((45, 50)));
+        assert_eq!(
+            crate::transformed_size(100, 100, &t, &crate::Limits::default()),
+            Ok((45, 50))
+        );
         // Rejected by `apply_transforms`: left out of the display size.
         let t = vec![Transform::Clap(clap(4, 4, 20)), Transform::Rotate(90)];
         assert_eq!(image(10, 20, t.clone()).display_size(), Some((20, 10)));
-        assert!(crate::transformed_size(10, 20, &t).is_err());
+        assert!(crate::transformed_size(10, 20, &t, &crate::Limits::default()).is_err());
     }
     #[test]
     fn span_finds_equal_keys() {

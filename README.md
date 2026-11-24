@@ -1,11 +1,10 @@
 # isobmff-rs
 
-Parses ISO-BMFF containers: HEIF (HEIC), AVIF (including the `mini` box) and the tracks of MP4/MOV/3GP/AVIS
-files. It decodes no pixels. It gives the item graph of a file (primary image, tiles, alpha, depth, thumbnails,
-gain map, Exif/XMP) and the keyframe byte ranges of a track; every coded item is a codec configuration record
-plus byte ranges of the file. hevc-rs and av1-rs decode those bytes; exif-rs parses the Exif and XMP bytes.
-Pure Rust, no dependencies, `#![forbid(unsafe_code)]`, bounded on hostile input. libheif, libavif and ffprobe
-are the parity oracles in CI.
+Parses ISO-BMFF: HEIF (HEIC), AVIF (with the `mini` box) and the tracks of MP4/MOV/3GP/AVIS files. It decodes no pixels.
+It gives the item graph of a file (primary image, tiles, alpha, depth, thumbnails, gain map, Exif/XMP) and the keyframe
+byte ranges of a track; every coded item is a codec configuration record plus byte ranges of the file. hevc-rs and
+av1-rs decode those bytes; exif-rs parses the Exif and XMP bytes. Pure Rust, no dependencies, `#![forbid(unsafe_code)]`,
+bounded on hostile input. libheif, libavif and ffprobe are the parity oracles in CI.
 
 ```toml
 isobmff = { git = "https://github.com/dobbo-ca/isobmff-rs", rev = "3a6579a61b4a4b5eb535f297afa4a0899ed1afd6" }
@@ -32,17 +31,12 @@ match &image.kind {
     _ => {}
 }
 let meta = heif.metadata(&file, image.id, &limits, &cancel)?; // meta.exif (TIFF bytes), meta.xmp
-
-// MP4/MOV: the byte ranges of the first 3 keyframes (docs/design.md, "MP4/MOV tracks")
-let movie = isobmff::parse_movie(&file, &limits, &cancel)?;   // or isobmff::read_movie(reader, ..)
-let track = movie.video_track().ok_or(Error::Unsupported("no video track"))?;
-let config = track.entries.first().and_then(|e| e.config()); // hvcC / av1C / avcC / vvcC
-let first = track.sync_samples(std::io::Cursor::new(&file[..]), 3, &limits, &cancel)?;
+// MP4/MOV keyframes (parse_movie, Track::sync_samples): docs/design.md, "MP4/MOV tracks"
 ```
 
 ## Resource limits
 
-`parse`, `read`, `item_bytes`, `metadata`, `parse_movie`, `read_movie` and the sample walks of `Track` take `&Limits` and a cancel flag (`&AtomicBool`); there is no unlimited entry point. Details and rationale: [docs/limits.md](docs/limits.md).
+`parse`, `read`, `item_bytes`, `metadata`, `parse_movie`, `read_movie`, the sample walks of `Track` and `apply_transforms` take `&Limits` and a cancel flag (`&AtomicBool`); there is no unlimited entry point. Each limit returns `Error::LimitExceeded(Limit::...)`; no thread is ever spawned; the cancel flag makes a call return `Error::Cancelled`. Details: [docs/limits.md](docs/limits.md).
 
 | Field | Default | Unit | Error (`Limit::...`) |
 |---|---|---|---|
@@ -60,11 +54,7 @@ let first = track.sync_samples(std::io::Cursor::new(&file[..]), 3, &limits, &can
 | `max_metadata_bytes` | 64 MiB | bytes of one Exif or XMP item | `MetadataBytes` |
 | `max_moov_bytes` | 64 MiB | bytes of `moov`, and of each `moof`, copied by `read_movie` | `MoovBytes` |
 
-Each limit returns `Error::LimitExceeded(Limit::...)`. No thread is ever spawned. Set the cancel flag from another thread: the call returns `Error::Cancelled`.
-
 ## Docs
-
-[design](docs/design.md), [parity](docs/parity.md), [limits](docs/limits.md), [threading](docs/threading.md),
-[safety](docs/safety.md), [fuzzing](docs/fuzzing.md), [benchmarks](docs/benchmarks.md),
-[dependencies](docs/dependencies.md), [testing](docs/testing.md), [gain maps](docs/gainmap.md), [corpus](docs/corpus.md),
-[transforms](docs/transforms.md) (`apply_transforms`: clap, irot, imir on decoded planes).
+[design](docs/design.md), [parity](docs/parity.md), [limits](docs/limits.md), [threading](docs/threading.md), [safety](docs/safety.md),
+[fuzzing](docs/fuzzing.md), [benchmarks](docs/benchmarks.md), [dependencies](docs/dependencies.md), [testing](docs/testing.md),
+[gain maps](docs/gainmap.md), [corpus](docs/corpus.md), [transforms](docs/transforms.md).

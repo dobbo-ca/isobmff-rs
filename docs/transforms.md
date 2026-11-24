@@ -8,7 +8,7 @@ changes the chroma format (below).
 ```rust
 let image = heif.primary_image()?;
 let out = isobmff::apply_transforms(planes, &image.transforms, &limits, &cancel)?;
-let size = isobmff::transformed_size(image.width, image.height, &image.transforms)?; // no planes
+let size = isobmff::transformed_size(image.width, image.height, &image.transforms, &limits)?; // no planes
 ```
 
 Types: `Planes { width, height, chroma, planes }`, `Plane { width, height, samples }`,
@@ -33,6 +33,11 @@ the transforms before it. `irot` is anticlockwise (90: output `[y][x]` = input `
 the input unchanged, without a copy. `transformed_size` gives the size with the same rules and no
 planes; `Image::display_size` uses the same rule, except that a transform that `apply_transforms`
 rejects is left out of it (it returns `Option`, not `Result`).
+
+Known difference: libheif rejects a second `irot`, `imir` or `clap` on one item (also with
+`ignore_transformations`). `Image::transforms` keeps every property as stored (the metadata rule),
+and `apply_transforms` and `transformed_size` apply them all, in order, so `[Rotate(90),
+Rotate(90)]` gives pixels where libheif gives an error. Valid files have at most one of each.
 
 Derived images: apply each input's own transforms to that input before it is used (an `iden`
 input, each grid tile, each overlay input), then the derived item's transforms to the result.
@@ -73,14 +78,15 @@ products beyond `i32`; we do not, so the result can differ from libheif there.
 - Odd crop: the chroma format is kept. The chroma rectangle starts at `floor(x/sx), floor(y/sy)` and
   is `ceil(w/sx) x ceil(h/sy)`, which always fits the chroma plane. For an odd offset the chroma
   shifts by one luma sample. Why: no sample is invented, memory stays a crop, and hevc-rs (chroma
-  format Mono or 4:2:0 only) can still hold the result. libheif converts to 4:4:4 (bilinear) when the
-  left or top offset is odd; that is the documented known difference of the oracle.
+  format Mono or 4:2:0 only) can still hold the result. libheif converts to 4:4:4 (bilinear) when
+  the left offset is odd (4:2:2) or the left or top offset is odd (4:2:0); that is the documented
+  known difference of the oracle.
 - 4:2:2 with `irot` 90 or 270: no 4:2:2 result exists (the chroma would be half the height). The chroma
   planes are made 4:4:4 by copying each sample into two columns, trimmed to the luma width, as they
   are rotated; the output chroma is `Yuv444`. libheif converts to 4:4:4 with bilinear upsampling, so
   it differs from this by the interpolation.
 - Other odd sides: each plane is processed at its own size, so the format is kept and the chroma
-  phase is off by half a luma sample. libheif converts to 4:4:4 in these cases (the known
+  moves by one luma sample on that axis (none for co-sited chroma). libheif converts to 4:4:4 in these cases (the known
   difference): 4:2:0 rotate 90 with odd width, rotate 270 with odd height, rotate 180 and mirror
   (either axis) with an odd width or height; 4:2:2 rotate 180 with odd height and a left/right
   mirror with odd width. libheif keeps 4:2:2 for a top/bottom mirror and for rotate 180 with odd
@@ -95,7 +101,8 @@ products beyond `i32`; we do not, so the result can differ from libheif there.
 
 ## Limits and cancel
 
-- `max_pixels`: the output size, checked before any work (not for an empty list).
+- `max_pixels`: the input size and the output size, checked before any work (not for an empty
+  list); `transformed_size` takes `&Limits` and checks both.
 - `max_alloc`: every new buffer is charged before it is allocated and given back after the step
   that replaces it. Rotation by 90 or 270 and a crop allocate; mirrors and 180 work in place. The
   input planes belong to the caller and are not charged. The peak of `[Rotate(90), Rotate(90)]` is

@@ -64,7 +64,7 @@
 //! [`apply_transforms`] applies the `clap`, `irot` and `imir` properties of an image
 //! ([`Image::transforms`], in ipma order) to planes that hevc-rs or av1-rs decoded;
 //! [`transformed_size`] gives the resulting size without planes. Every new buffer is charged to
-//! `max_alloc`, the output size to `max_pixels`, and the cancel flag is checked at least every
+//! `max_alloc`, the input and output size to `max_pixels`, and the cancel flag is checked at least every
 //! 64 rows. The sample type is `isobmff::transform::Samples` (also `isobmff::PlaneSamples`), because
 //! `isobmff::Samples` is the sample walk of a track. See `docs/transforms.md`.
 //!
