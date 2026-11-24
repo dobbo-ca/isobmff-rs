@@ -4,7 +4,7 @@ use libfuzzer_sys::fuzz_target;
 #[path = "../common.rs"]
 mod common;
 
-// data = the whole file; parse_movie, then every walk over every track (all samples,
+// data = the whole file; parse_movie, then every walk over every track (the first 65 536 samples,
 // sync_samples, sync_sample_at).
 fuzz_target!(|data: &[u8]| {
     let _ = isobmff::__fuzz::movie(data, &common::small_limits());

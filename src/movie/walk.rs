@@ -568,12 +568,14 @@ impl<'a> Walk<'a> {
         })
     }
 
-    /// A scan that visits every sample (no `stss`, or fragment samples) stops at sample number
-    /// `n` above the file length: a sample is at least one byte, so a file of non-overlapping
-    /// samples has fewer samples than bytes. Chunk offsets or runs that repeat could otherwise
-    /// make the scan visit up to 2^32 samples of a small file.
+    /// A walk that visits every sample (`samples`, a scan without `stss`, fragment samples)
+    /// stops at sample number `n` above twice the file length. Every sample costs at least half
+    /// a byte of table (a 4-bit `stz2` field; 4 bytes for `stsz` and `trun` sizes), so a file
+    /// whose samples do not overlap has fewer samples than that. Chunk offsets or runs that
+    /// repeat could otherwise make the walk visit up to 2^32 samples of a small file. A
+    /// constant-size `stsz` that counts decoded audio samples (QuickTime v1 sound) can exceed it.
     pub(crate) fn check_overlap(&self, n: u64) -> Result<(), Error> {
-        if n > self.file_len {
+        if n > self.file_len.saturating_mul(2) {
             return Err(Error::Malformed(if n > self.moov {
                 "trun"
             } else {
@@ -769,7 +771,10 @@ impl<R: Read + Seek> Iterator for Samples<'_, R> {
             }
         }
         let w = self.walk.as_mut()?;
-        match w.sample(&mut self.r, self.next) {
+        match w
+            .check_overlap(self.next)
+            .and_then(|()| w.sample(&mut self.r, self.next))
+        {
             Ok(s) => {
                 self.next = self.next.saturating_add(1);
                 Some(Ok(s))
@@ -791,8 +796,9 @@ impl Track {
     /// # Errors
     ///
     /// Each item is an `Err` on a bad table ([`Error::Malformed`]), a sample past the end of the
-    /// file ([`Error::Truncated`]), an external data reference ([`Error::Unsupported`]), a
-    /// reader error, or a limit.
+    /// file ([`Error::Truncated`]), a sample number above twice the file length (overlapping
+    /// samples: [`Error::Malformed`] `stsz` or `trun`), an external data reference
+    /// ([`Error::Unsupported`]), a reader error, or a limit.
     pub fn samples<'a, R: Read + Seek>(
         &'a self,
         r: R,
@@ -817,7 +823,7 @@ impl Track {
     /// # Errors
     ///
     /// As [`samples`](Self::samples); [`Error::Malformed`] when a scan reaches a sample number
-    /// above the file length (overlapping samples); [`Error::LimitExceeded`] for the result.
+    /// above twice the file length (overlapping samples); [`Error::LimitExceeded`] for the result.
     pub fn sync_samples<R: Read + Seek>(
         &self,
         mut r: R,
@@ -874,7 +880,8 @@ impl Track {
     /// # Errors
     ///
     /// As [`samples`](Self::samples); [`Error::Malformed`] (`stsz` or `trun`) when the scan
-    /// reaches a sample number above the file length, which only overlapping samples can do.
+    /// reaches a sample number above twice the file length, which only overlapping samples can do
+    /// (a constant-size `stsz` that counts decoded audio samples, as in QuickTime v1 sound, can too).
     pub fn sync_sample_at<R: Read + Seek>(
         &self,
         mut r: R,

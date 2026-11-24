@@ -127,7 +127,8 @@ pub enum ItemError {
     /// A data reference other than 0, an unknown construction method, or a construction method 2
     /// (item offset) item that has no single `iloc` reference or a source chain that is too long.
     Unsupported(&'static str),
-    /// An extent overflows or ends past the file (or past `idat`).
+    /// An extent overflows or ends past the file (or past `idat`); for construction method 2, an
+    /// `extent_index` of 0 or past the `iloc` reference, or a range past the end of the source item.
     OutOfRange,
     /// Construction method 1 but the file has no `idat` box.
     NoIdat,

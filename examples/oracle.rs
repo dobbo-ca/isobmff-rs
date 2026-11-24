@@ -916,6 +916,34 @@ fn box_payload(d: &[u8], e: Extent) -> Option<&[u8]> {
     b.get(header..)
 }
 
+/// The `frma` original format in the `sinf` of a visual sample entry (after its 78 fixed bytes).
+fn frma(d: &[u8], e: &isobmff::SampleEntry) -> Option<[u8; 4]> {
+    let start = usize::try_from(e.range.offset).ok()?.checked_add(86)?;
+    let end = usize::try_from(e.range.offset.checked_add(e.range.length)?).ok()?;
+    let sinf = boxes_in(d, start, end)
+        .into_iter()
+        .find(|b| &b.2 == b"sinf")?;
+    let frma = boxes_in(d, sinf.0 + 8, sinf.0 + sinf.1)
+        .into_iter()
+        .find(|b| &b.2 == b"frma")?;
+    d.get(frma.0 + 8..frma.0 + 12)?.try_into().ok()
+}
+
+/// Whether ffmpeg keeps sample entry `e` after `first` (`mov_skip_multiple_stsd`): its codec tag
+/// is the `frma` format of an `encv`/`enca` first entry, else the kind of `first`; an entry with
+/// another fourcc is dropped, except for the listed exceptions.
+fn entry_kept(d: &[u8], first: &isobmff::SampleEntry, e: &isobmff::SampleEntry) -> bool {
+    let tag = if matches!(&first.kind.0, b"encv" | b"enca") {
+        frma(d, first).unwrap_or(first.kind.0)
+    } else {
+        first.kind.0
+    };
+    tag == [0; 4]
+        || tag == e.kind.0
+        || matches!(&tag, b"apcn" | b"apch" | b"dvpp" | b"dvcp" | b"jpeg")
+        || (&tag == b"AV1x" && &e.kind.0 == b"AVup")
+}
+
 /// What ffmpeg computes differently from the tables (docs/parity.md, gate 5): the fields the
 /// oracle prints as `-`.
 #[derive(Default)]
@@ -1052,14 +1080,11 @@ fn mp4_text<R: Read + Seek>(
                 }
             }
         }
-        // ffmpeg drops the samples of a sample description whose fourcc differs from the first
-        // one (mov.c:2582-2588); an entry with the same fourcc keeps its samples (mov.c:2143).
-        let first_kind = t.entries.first().map(|e| e.kind);
-        if all.iter().any(|s| {
-            t.entries
-                .get((s.entry as usize).saturating_sub(1))
-                .map(|e| e.kind)
-                != first_kind
+        // ffmpeg drops the samples of a later sample description whose fourcc differs from the
+        // codec tag (mov_skip_multiple_stsd, mov.c:2524-2548); if any later entry is kept, every
+        // sample is kept (pseudo_stream_id -1, mov.c:2588). See docs/parity.md.
+        if t.entries.split_first().is_some_and(|(first, rest)| {
+            all.iter().any(|s| s.entry != 1) && !rest.iter().any(|e| entry_kept(data, first, e))
         }) {
             let _ = writeln!(o, "skip {} entry", t.id);
             continue;

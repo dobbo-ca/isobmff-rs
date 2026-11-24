@@ -143,12 +143,17 @@ e <id> <class>                                                    (walk error; n
 skip <id> <reason>                                                (track not gated: `avif`, `handler` or `entry`)
 ```
 
-- **Gated tracks.** Handler `vide` or `pict`. A track where a sample uses a sample description
-  whose fourcc differs from that of entry 1 is `skip <id> entry`, because ffmpeg drops those samples
-  (`mov_skip_multiple_stsd`, `mov.c:2582-2588`, `4198-4206`). A second entry with the same fourcc
-  (`avc1` + `avc1`, a parameter-set change) is not skipped: ffmpeg keeps its samples, so the
-  entry mapping and the chunk offsets after the switch are compared. Other handlers are
-  `skip <id> handler`.
+- **Gated tracks.** Handler `vide` or `pict`. The oracle models ffmpeg's codec tag: the tag of
+  entry 1 is its `frma` original format when its kind is `encv` or `enca`, else its kind.
+  `mov_skip_multiple_stsd` (`mov.c:2524-2548`) drops entry i > 1 when its fourcc differs from the
+  tag (except `apcn`, `apch`, `dvpp`, `dvcp`, `jpeg` and `AV1x` with `AVup`, which are kept), and
+  ffmpeg then drops the samples that use a dropped entry (`mov.c:4198-4206`). When any later
+  entry is kept, `pseudo_stream_id` becomes -1 (`mov.c:2588`) and every sample is kept, even one
+  that uses an entry of another fourcc. A track is `skip <id> entry` only when a sample uses an
+  entry other than 1 and no later entry is kept, so a second `avc1` after `avc1` (a
+  parameter-set change), and `encv(frma avc1)` followed by `avc1`, are compared (the entry
+  mapping and the chunk offsets after the switch), while `avc1` followed by `hvc1`, or
+  `encv(frma avc1)` followed by `encv`, are skipped. Other handlers are `skip <id> handler`.
 - **Skipped files.** One kind of file is `skip <id> <why>` for every track, whatever its handler,
   so that no `s` line of any track is compared (`mp4cmp.awk` compares only the ids with an `s` or
   `e` line in ours, and ignores what ffprobe prints for the others; a file whose tracks are all
@@ -198,9 +203,9 @@ skip <id> <reason>                                                (track not gat
   `fferr` is 0, a track with an `e` line skips only its `at` lines (ours has none): a walk error of
   ours is not forgiven, ffprobe keys past our last sample are a mismatch, and the file needs a
   `known-differences.tsv` line (side `mp4`) with the reason. `-v perr=1` is for a file that ours
-  failed to parse (`error <class>`): with `fferr` 0, any `s` line of ffprobe is a mismatch.
-  Files that passed only through the old `e` leniency with `fferr` 0 (a truncated file where ffprobe
-  gives a short last packet without a message) now need a line on the first CI run.
+  failed to parse (`error <class>`): when ffprobe exited 0 (`-v ffrc`, the exit status; its stderr
+  does not matter, a warning on a file it reads in full must not hide a parse error), any `s` line
+  of ffprobe is a mismatch. The first CI run after the `e` leniency was removed needed no new line.
 
 ## The `mini` box in the two oracles
 
@@ -267,8 +272,7 @@ the corpus gate says if one still differs):
      no error is a mismatch, so a valid file that parse_movie rejects cannot hide). The classes
      no-moov, truncated, unknown-format and the limit classes are not gated. The parse-error check
      counts every ffprobe packet, whatever the stream, and the corpus of the HEIF/AVIF gates is in
-     this input set, so the first CI run may need `known-differences.tsv` lines (side `mp4`) for
-     such files (a likely one: `libheif__fuzzing__data__sequence_corpus__j2ki-siz-tile-alloc-oom.heif`).
+     this input set; the first CI run with this check needed no `known-differences.tsv` line.
      Lines of side `mp4` are stale when the file is now identical, as in gate 1.
    - **5b**: mutations that isobmff-rs reads to the end (a sample line and no `e` line) while
      ffprobe exits 0 with nothing on stderr; the others are only counted. Mutations of a file
@@ -283,8 +287,16 @@ the corpus gate says if one still differs):
    previous run, as the standard says), fragments with `sidx` but no `tfdt` (ffmpeg takes the sidx time,
    `mov.c:5079-5093`; we take the end of the previous run), a hybrid track (`moov` samples plus fragments)
    with a negative cto, `cmov`. A `traf` of a track without `trex`, or of an unknown track, is kept raw
-   here as in ffmpeg (which ignores it, `mov.c` "could not find corresponding trex/track id"), so its samples
-   are not listed. A `trun` of size 0 and a `moof` without `mvex` are errors here. Listed so far (side `mp4`): a file with a track whose samples lie
+   here, so its samples are not listed. ffmpeg does not ignore it: `mov_read_tfhd` (`mov.c:4881-4883`)
+   skips the `tfhd` with a warning and leaves `found_tfhd` as it was, so the `trun` that follows
+   fails with "trun track id unknown" (`mov.c:5013-5016`) when it is in the first `traf` of the
+   `moof`, or is added to the track of the previous `traf` of that `moof` (its track id, base and
+   defaults). Both differ from ours and are known differences. Two top-level `moov` boxes: ffmpeg
+   parses the first and skips the others with a warning (`mov.c:1181`); so do we, and the later
+   `moov` is kept in `Movie::other_boxes`. A constant-size `stsz` that counts decoded audio samples
+   (QuickTime v1 sound) can have more samples than twice the file length, which `sync_samples`,
+   `sync_sample_at` and `samples` reject as `Malformed("stsz")` (docs/limits.md). A `trun` of
+   size 0 and a `moof` without `mvex` are errors here. Listed so far (side `mp4`): a file with a track whose samples lie
    past the end of the file (ffmpeg interleaves the tracks and stops reading at the first sample it
    cannot read, `mov.c:8589-8613`, `8801`): `maf/vsaf/1.mp4`.
 

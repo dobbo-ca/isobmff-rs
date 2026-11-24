@@ -259,9 +259,9 @@ fn parse_trun(ctx: &Ctx<'_>, h: &BoxHeader, tf: &Traf) -> Result<(Run, u64, i64)
     Ok((run, end, dts_end))
 }
 
-/// `traf` (depth 1 box). A `traf` without `tfhd`, of a track that is not in `moov` or of a track
-/// without `trex` is kept whole in `other`. `implicit` is where the data of the last run of this
-/// `moof` ended.
+/// `traf` (depth 1 box). A `traf` with no `tfhd` and no `tfdt` or `trun`, of a track that is not
+/// in `moov` or of a track without `trex` is kept whole in `other`. `implicit` is where the data
+/// of the last run of this `moof` ended.
 fn parse_traf(
     ctx: &Ctx<'_>,
     h: &BoxHeader,
@@ -273,7 +273,7 @@ fn parse_traf(
 ) -> Result<(), Error> {
     // Like ffmpeg, the `tfhd` need not be first: other boxes may come before it (they are kept
     // raw below). A `tfdt` or `trun` before it is malformed, and a `traf` without `tfhd` is kept
-    // whole.
+    // whole when it has no `tfdt` or `trun` either.
     let mut boxes = Boxes::new(ctx, h.payload(), 2, false)?;
     let mut first = None;
     while let Some(c) = boxes.next_box()? {

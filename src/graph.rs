@@ -972,7 +972,8 @@ impl Heif {
     ///
     /// [`Error::NoSuchItem`]; the [`ItemError`] of the item as an [`Error`] (`Malformed("iloc")`
     /// without a location, `Unsupported` for a data reference or a method-2 item with no single `iloc` reference or a source chain that is too long (or a cycle),
-    /// `Truncated` for an extent past the file, `Malformed("idat")`); [`Error::Truncated`] when
+    /// `Truncated` for an extent past the file or, for method 2, an `extent_index` of 0 or past the
+    /// reference or a range past the end of the source item, `Malformed("idat")`); [`Error::Truncated`] when
     /// an extent is not inside `data`; `LimitExceeded(Alloc)`; [`Error::OutOfMemory`];
     /// [`Error::Cancelled`].
     pub fn item_bytes<'a>(
