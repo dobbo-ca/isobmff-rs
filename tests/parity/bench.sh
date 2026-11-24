@@ -21,6 +21,7 @@ heif-oracle --bench "$iters" $W/corpus > $W/h.raw || bad=1
 avif-oracle --bench "$iters" $W/corpus > $W/a.raw || bad=1
 isobmff-bench --threads 1 "$iters" $W/corpus > $W/r1.raw || bad=1
 isobmff-bench "$iters" $W/corpus > $W/rn.raw || bad=1
+isobmff-bench --transform 5 > $W/tr.tsv || bad=1
 for t in h a r1 rn; do sort -t "$tab" -k1,1 $W/$t.raw > $W/$t.tsv; done
 # name size libheif ns, rust 1 thread ns, rust default ns (and the same with libavif)
 join -t "$tab" $W/sizes.tsv $W/h.tsv | join -t "$tab" - $W/r1.tsv | join -t "$tab" - $W/rn.tsv > $W/heif.tsv
@@ -64,7 +65,10 @@ table() {
   echo "### libheif ($(wc -l < $W/heif.tsv) files timed by all three tools)"; echo
   table $W/heif.tsv libheif; echo
   echo "### libavif ($(wc -l < $W/avif.tsv) AVIF files timed by all three tools)"; echo
-  table $W/avif.tsv libavif
+  table $W/avif.tsv libavif; echo
+  echo "### apply_transforms on 8000 x 6000 4:2:0 planes, one thread, median of 5 (ms)"; echo
+  echo "| case | ms |"; echo "|---|---|"
+  while IFS="$tab" read -r n ms; do echo "| $n | $ms |"; done < $W/tr.tsv
 } > "$REP/summary.md"
 cp $W/heif.tsv "$REP/heif.tsv"; cp $W/avif.tsv "$REP/avif.tsv"
 rm -rf $W
