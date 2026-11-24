@@ -6,3 +6,5 @@
 # The rows of the generated files (unci_*) are not listed here: `oracle gen-transforms` predicts
 # them from the geometry and the gate adds them. List the corpus files here.
 file	image	reason
+link-u__kimono.crop.avif	1	libheif-444
+link-u__kimono.mirror-vertical.rotate270.crop.avif	1	libheif-444

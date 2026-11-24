@@ -4,14 +4,18 @@
 //! wrote (`<raw-dir>/<name>/<id>.planes`, no transforms applied), applies the transforms of item
 //! `<id>` with `isobmff::apply_transforms` and writes `<out-dir>/<name>/<id>.planes` (or `.err`).
 //! An alpha plane (the plane after the luma and chroma planes) takes the transforms of the alpha
-//! item, as libheif decodes the alpha item on its own, not those of the main image.
+//! item, as libheif decodes the alpha item on its own, not those of the main image. Without an
+//! alpha item (a grid with alpha in the tiles) it takes the transforms of the main image.
 //!
-//! `transform-cmp <raw-dir> <libheif-dir> <out-dir> <known.tsv> <report-dir>` compares the two
-//! result trees and writes `transform-counts.md` and `transform.diff` into `<report-dir>`.
+//! `transform-cmp <raw-dir> <libheif-dir> <out-dir> <known.tsv> <graph-known.tsv> <report-dir>`
+//! compares the two result trees and writes `transform-counts.md` and `transform.diff` into `<report-dir>`.
 
 use super::{files, limits, opts, usage};
-use isobmff::{Chroma, Heif, Limits, Plane, PlaneSamples as Samples, Planes, apply_transforms};
-use std::collections::BTreeMap;
+use isobmff::{
+    Chroma, Heif, Image, ImageKind, Limits, Plane, PlaneSamples as Samples, Planes,
+    apply_transforms,
+};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -112,10 +116,11 @@ fn to_planes(p: &Parsed) -> Option<Planes> {
             samples: if q.bps == 1 {
                 Samples::U8(q.data.to_vec())
             } else {
+                let (pairs, _) = q.data.as_chunks::<2>();
                 Samples::U16(
-                    q.data
-                        .chunks_exact(2)
-                        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    pairs
+                        .iter()
+                        .map(|&[a, b]| u16::from_le_bytes([a, b]))
                         .collect(),
                 )
             },
@@ -196,6 +201,37 @@ fn scale(a: &Plane, dw: u32, dh: u32) -> Option<Plane> {
     })
 }
 
+/// The inputs of a derived image (iden, grid tiles, overlay inputs).
+fn inputs(img: &Image) -> Vec<u32> {
+    match &img.kind {
+        ImageKind::Identity { input } => vec![*input],
+        ImageKind::Grid(g) => g.tiles.clone(),
+        ImageKind::Overlay(o) => o.inputs.iter().map(|i| i.id).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// True when an input of `img`, at any depth, has transforms. libheif passes
+/// `ignore_transformations` on to grid tiles, iden inputs and overlay inputs (grid.cc:543 and
+/// :677, iden.cc:98, overlay.cc:392), so the raw planes of such an image also lack the
+/// transforms of its inputs and are not what `img.transforms` applies to. Not compared.
+fn inputs_transformed(h: &Heif, img: &Image) -> bool {
+    let mut seen = BTreeSet::new();
+    let mut todo = inputs(img);
+    while let Some(id) = todo.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Ok(x) = h.image(id) {
+            if !x.transforms.is_empty() {
+                return true;
+            }
+            todo.extend(inputs(&x));
+        }
+    }
+    false
+}
+
 fn transform_one(
     h: &Heif,
     id: u32,
@@ -205,17 +241,24 @@ fn transform_one(
 ) -> Result<Vec<u8>, &'static str> {
     let mut planes = parse_planes(raw).and_then(|p| to_planes(&p)).ok_or("raw")?;
     let img = h.image(id).map_err(|_| "image")?;
+    if inputs_transformed(h, &img) {
+        return Err("inputs");
+    }
     let n_main = if planes.chroma == Chroma::Mono { 1 } else { 3 };
-    let alpha = if planes.planes.len() == n_main + 1 {
-        planes.planes.pop()
-    } else if planes.planes.len() == n_main {
-        None
-    } else {
+    if planes.planes.len() != n_main && planes.planes.len() != n_main + 1 {
         return Err("raw");
+    }
+    // An alpha plane without an alpha item of the image (a grid whose tiles have the alpha items)
+    // is part of the main decode: libheif assembles it into the grid image (grid.cc:575-604, the
+    // alpha plane is filled and each tile's alpha is copied in) and applies the transforms of the
+    // grid item to every channel of that image (image_item.cc:1406-1426). So it stays an extra
+    // full-size plane of the one `apply_transforms` call below.
+    let alpha = match img.alpha {
+        Some(aid) if planes.planes.len() == n_main + 1 => planes.planes.pop().map(|a| (a, aid)),
+        _ => None,
     };
     let mut res = apply_transforms(planes, &img.transforms, lim, cancel).map_err(|e| token(&e))?;
-    if let Some(a) = alpha {
-        let aid = img.alpha.ok_or("alpha")?;
+    if let Some((a, aid)) = alpha {
         let atr = h.image(aid).map_err(|_| "alpha")?.transforms;
         let ap = Planes {
             width: a.width,
@@ -285,6 +328,8 @@ struct Counts {
     visited: u32,
     inputs: u32,
     raw_err: u32,
+    rejected: u32,
+    derived: u32,
     images: u32,
     planes: u32,
     exact: u32,
@@ -386,9 +431,19 @@ fn token_of(dir: &Path, id: u32) -> Option<String> {
 }
 
 pub fn run_cmp(args: &[String]) {
-    let [raw, lh, rs, known_tsv, rep] = args else {
+    let [raw, lh, rs, known_tsv, graph_tsv, rep] = args else {
         usage()
     };
+    // files that are a `heif` known difference of the graph gate (tests/parity/known-differences.tsv)
+    let graph_known: Vec<String> = fs::read_to_string(graph_tsv)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            let (n, side) = (f.next()?, f.next()?);
+            (side == "heif" && !n.starts_with('#')).then(|| n.to_string())
+        })
+        .collect();
     // (name, id) -> reason; the value is set to true once the entry was compared
     let mut known: BTreeMap<(String, u32), bool> = BTreeMap::new();
     for l in fs::read_to_string(known_tsv).unwrap_or_default().lines() {
@@ -429,8 +484,21 @@ pub fn run_cmp(args: &[String]) {
         if ids.is_empty() {
             continue;
         }
+        // isobmff::parse rejects the file and the graph gate lists it: not a transform difference
+        if graph_known.contains(&name)
+            && ids
+                .iter()
+                .any(|id| token_of(&sd, *id).as_deref() == Some("parse"))
+        {
+            c.rejected += 1;
+            continue;
+        }
         c.inputs += 1;
         for id in ids {
+            if token_of(&sd, id).as_deref() == Some("inputs") {
+                c.derived += 1;
+                continue;
+            }
             c.images += 1;
             let is_known = known.get_mut(&(name.clone(), id)).is_some_and(|u| {
                 *u = true;
@@ -492,12 +560,23 @@ pub fn run_cmp(args: &[String]) {
     let t = format!(
         "| transform: files libheif read / files with a decoded image | {} / {} |\n\
          | transform: images libheif cannot decode or write as planes (not compared) | {} |\n\
+         | transform: files isobmff-rs rejects (graph known difference) (not compared) | {} |\n\
+         | transform: derived images whose inputs have transforms (not compared) | {} |\n\
          | transform: images compared | {} |\n\
          | transform: planes compared | {} |\n\
          | transform: exact matches (planes or the same error) | {} |\n\
          | transform: known differences (libheif-444: luma and alpha exact, chroma skipped) | {} |\n\
          | transform: failures | {} |\n",
-        c.visited, c.inputs, c.raw_err, c.images, c.planes, c.exact, c.known, c.failures
+        c.visited,
+        c.inputs,
+        c.raw_err,
+        c.rejected,
+        c.derived,
+        c.images,
+        c.planes,
+        c.exact,
+        c.known,
+        c.failures
     );
     fs::create_dir_all(rep).unwrap();
     fs::write(Path::new(rep).join("transform-counts.md"), t).unwrap();

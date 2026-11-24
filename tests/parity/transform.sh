@@ -73,7 +73,7 @@ full() {
 
   libheif $W/in $W/raw $W/exp
   isobmff-oracle transform $W/in $W/raw $W/rs 2> $W/rs.err || bad=1
-  isobmff-oracle transform-cmp $W/raw $W/exp $W/rs $W/known.tsv $W/rep || bad=1
+  isobmff-oracle transform-cmp $W/raw $W/exp $W/rs $W/known.tsv tests/parity/known-differences.tsv $W/rep || bad=1
 
   images=$(cat $W/rep/transform-images 2>/dev/null || echo 0)
   [ "$images" -ge "$MIN" ] || echo "only $images images compared, want at least $MIN" > $W/d-cover

@@ -8,7 +8,7 @@
 //! oracle mp4 [--read] <in-dir> <out-dir>                  tracks.txt (MP4/MOV tracks and keyframes; the other side is ffprobe)
 //! oracle stats <in-dir> <out.tsv>                         one line of corpus statistics per file
 //! oracle transform <in-dir> <raw-dir> <out-dir>            apply_transforms on the raw planes of heif-transform-oracle (docs/parity.md)
-//! oracle transform-cmp <raw> <libheif> <out> <known.tsv> <report-dir>   compare the two result trees
+//! oracle transform-cmp <raw> <libheif> <out> <known.tsv> <graph-known.tsv> <report-dir>   compare the two result trees
 //! oracle gen-transforms <out-dir> <known.tsv>             deterministic HEIF files with unci items for the transform oracle
 //! ```
 //!
@@ -46,7 +46,7 @@ const NOT_METADATA: [&[u8; 4]; 13] = [
 
 fn usage() -> ! {
     eprintln!(
-        "usage: oracle heif [--threads N] [--read] <in-dir> <out-dir>\n       oracle avif [--threads N] <in-dir> <out-dir>\n       oracle mp4 [--read] <in-dir> <out-dir>\n       oracle gen <in-dir> <out-dir>\n       oracle stats <in-dir> <out.tsv>\n       oracle transform <in-dir> <raw-dir> <out-dir>\n       oracle transform-cmp <raw> <libheif> <out> <known.tsv> <report-dir>\n       oracle gen-transforms <out-dir> <known.tsv>"
+        "usage: oracle heif [--threads N] [--read] <in-dir> <out-dir>\n       oracle avif [--threads N] <in-dir> <out-dir>\n       oracle mp4 [--read] <in-dir> <out-dir>\n       oracle gen <in-dir> <out-dir>\n       oracle stats <in-dir> <out.tsv>\n       oracle transform <in-dir> <raw-dir> <out-dir>\n       oracle transform-cmp <raw> <libheif> <out> <known.tsv> <graph-known.tsv> <report-dir>\n       oracle gen-transforms <out-dir> <known.tsv>"
     );
     std::process::exit(2)
 }

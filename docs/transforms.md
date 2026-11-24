@@ -34,6 +34,12 @@ the input unchanged, without a copy. `transformed_size` gives the size with the 
 planes; `Image::display_size` uses the same rule, except that a transform that `apply_transforms`
 rejects is left out of it (it returns `Option`, not `Result`).
 
+Derived images: apply each input's own transforms to that input before it is used (an `iden`
+input, each grid tile, each overlay input), then the derived item's transforms to the result.
+libheif does this (it decodes inputs with the caller's options: `grid.cc:543`, `iden.cc:98`,
+`overlay.cc:392`), and a grid pastes its tiles at their size after their transforms. An `iden`
+chain is applied innermost first.
+
 ## Clap rounding
 
 `Clap::crop_rounded(width, height)` is the rule of libheif 1.23.7 (`Box_clap::get_crop` and the
@@ -80,7 +86,9 @@ products beyond `i32`; we do not, so the result can differ from libheif there.
   mirror with odd width. libheif keeps 4:2:2 for a top/bottom mirror and for rotate 180 with odd
   width, where it matches the helper exactly.
 - Alpha, depth and gain-map planes: pass the transforms of the item that the plane belongs to, not
-  those of the main image. libheif decodes an alpha or auxiliary item with its own `ipma` list only;
+  those of the main image. The exception is an alpha plane without an alpha item of the image (the
+  alpha items belong to the tiles of a grid): libheif assembles it into the grid image and applies
+  the grid's transforms to it, so keep it as an extra plane of the main call. libheif decodes an alpha or auxiliary item with its own `ipma` list only;
   an alpha plane of another size is scaled by the caller before it is attached as an extra plane
   (libheif: nearest neighbour). A gain map is an item of its own: `Image::gain_map` and its source
   image's `transforms`.
