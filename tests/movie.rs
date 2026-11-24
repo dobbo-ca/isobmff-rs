@@ -777,3 +777,470 @@ fn f_cut() -> Vec<u8> {
     let at = f.windows(4).position(|w| w == b"moov").unwrap();
     f[..at + 12].to_vec()
 }
+
+// ---- fragments ----
+
+fn numbers(v: &[Sample]) -> Vec<u64> {
+    v.iter().map(|s| s.number).collect()
+}
+
+/// A fragmented file with one track and 4-byte samples by default (`trex`), whose `moof` holds
+/// `trafs`.
+fn one_moof(trafs: Vec<Vec<u8>>) -> Vec<u8> {
+    frag_file(1, &[trex(1, 1, 10, 4, 0)], move |_, _| moof(&trafs))
+}
+
+#[test]
+fn fragment_fields_and_offsets() {
+    let f = movie_frag();
+    let m = parse(&f);
+    assert!(m.fragmented);
+    let d = mdat0(&f);
+    let (t1, t2) = (m.track(1).unwrap(), m.track(2).unwrap());
+    assert_eq!((t1.sample_count, t2.sample_count), (6, 2));
+    // Track 1: tfhd over trex, trun over tfhd, default-base-is-moof, a second run without
+    // data_offset (continues after the first), an explicit base, tfdt v1, first_sample_flags.
+    let s1 = samples(t1, &f);
+    assert_eq!(
+        spans(&s1),
+        [
+            (d, 20),
+            (d + 20, 20),
+            (d + 40, 7),
+            (d + 47, 8),
+            (d + 104, 6),
+            (d + 110, 7)
+        ]
+    );
+    assert_eq!(numbers(&s1), [1, 2, 3, 4, 5, 6]);
+    let dts: Vec<i64> = s1.iter().map(|s| s.dts).collect();
+    assert_eq!(dts, [0, 200, 400, 450, 5000, 5100]);
+    let cto: Vec<i32> = s1.iter().map(|s| s.cto).collect();
+    assert_eq!(cto, [0, 0, 0, 0, -5, 3]);
+    assert_eq!(s1[4].pts(), 4995);
+    let sync_flags: Vec<bool> = s1.iter().map(|s| s.sync).collect();
+    assert_eq!(sync_flags, [true, true, true, true, false, true]);
+    let flags: Vec<Option<u32>> = s1.iter().map(|s| s.flags).collect();
+    let tfhd_flags = Some(0x0200_0000);
+    assert_eq!(
+        flags,
+        [
+            tfhd_flags,
+            tfhd_flags,
+            tfhd_flags,
+            tfhd_flags,
+            Some(0x10000),
+            Some(0)
+        ]
+    );
+    assert!(s1.iter().all(|s| s.entry == 1));
+    // Track 2: the trex defaults, and an implicit base after the last run of track 1.
+    let s2 = samples(t2, &f);
+    assert_eq!(spans(&s2), [(d + 55, 10), (d + 65, 10)]);
+    assert_eq!(s2.iter().map(|s| s.dts).collect::<Vec<_>>(), [0, 100]);
+    assert!(s2.iter().all(|s| !s.sync && s.flags == Some(0x10000)));
+    // Keyframes: fragment samples count like the samples of moov.
+    assert_eq!(numbers(&sync(t1, &f, 10).unwrap()), [1, 2, 3, 4, 6]);
+    assert_eq!(numbers(&sync(t1, &f, 2).unwrap()), [1, 2]);
+    assert!(sync(t2, &f, 5).unwrap().is_empty());
+    for (time, want) in [(-10, 1), (399, 2), (449, 3), (450, 4), (5102, 4), (5103, 6)] {
+        assert_eq!(at(t1, &f, time), Some(want), "t = {time}");
+    }
+    assert_eq!(at(t1, &f, i64::MAX), Some(6));
+    assert_eq!(at(t2, &f, 0), None);
+    // mvex, the mdat and the two mfhd are kept; the moof boxes themselves are parsed.
+    let kinds: Vec<String> = m.other_boxes.iter().map(|(k, _)| k.to_string()).collect();
+    assert_eq!(kinds, ["mvex", "mdat", "mfhd", "mfhd"]);
+}
+
+#[test]
+fn tfdt_versions_and_continuation() {
+    // Version 0 in the first moof; the second has no tfdt and continues at the end of the first.
+    let m1 = |off: u32| {
+        moof(&[traf(&[
+            tfhd(1, 0x2_0000, &[]),
+            tfdt(0, 777),
+            trun(0, 0x1, 2, &[off], &[]),
+        ])])
+    };
+    let m2 = |off: u32| {
+        moof(&[traf(&[
+            tfhd(1, 0x2_0000, &[]),
+            trun(0, 0x1, 1, &[off], &[]),
+        ])])
+    };
+    let len1 = m1(0).len() as u64;
+    let f = frag_file(1, &[trex(1, 1, 10, 4, 0)], |at, data| {
+        cat(&[
+            &m1((data - at) as u32),
+            &m2((data as i64 + 8 - (at + len1) as i64) as u32),
+        ])
+    });
+    let m = parse(&f);
+    let d = mdat0(&f);
+    let s = samples(&m.tracks[0], &f);
+    assert_eq!(spans(&s), [(d, 4), (d + 4, 4), (d + 8, 4)]);
+    assert_eq!(s.iter().map(|s| s.dts).collect::<Vec<_>>(), [777, 787, 797]);
+    // Version 1 above i64::MAX is malformed.
+    for t in [u64::MAX, 1 << 63] {
+        let f = one_moof(vec![traf(&[tfhd(1, 0x2_0000, &[]), tfdt(1, t)])]);
+        assert_eq!(parse_err(&f), Error::Malformed("tfdt"));
+    }
+    // So is a run whose end passes i64::MAX.
+    let f = one_moof(vec![traf(&[
+        tfhd(1, 0x2_0000, &[]),
+        tfdt(1, i64::MAX as u64),
+        trun(0, 0x1, 1, &[0], &[]),
+    ])]);
+    assert_eq!(parse_err(&f), Error::Malformed("trun"));
+}
+
+#[test]
+fn first_sample_flags_and_per_sample_flags() {
+    let f = frag_file(1, &[trex(1, 1, 10, 4, 0)], |at, data| {
+        let off = (data - at) as u32;
+        moof(&[traf(&[
+            tfhd(1, 0x2_0000, &[]),
+            // The first sample is not a sync sample; the others have the default (sync).
+            trun(0, 0x1 | 0x4, 3, &[off, 0x10000], &[]),
+            // A flags field per sample wins over first_sample_flags.
+            trun(0, 0x4 | 0x400, 2, &[0x10000], &[0, 0x10000]),
+        ])])
+    });
+    let m = parse(&f);
+    let s = samples(&m.tracks[0], &f);
+    let d = mdat0(&f);
+    assert_eq!(s.len(), 5);
+    assert!(
+        s.iter()
+            .enumerate()
+            .all(|(i, x)| x.range.offset == d + 4 * i as u64)
+    );
+    let flags: Vec<u32> = s.iter().map(|s| s.flags.unwrap()).collect();
+    assert_eq!(flags, [0x10000, 0, 0, 0, 0x10000]);
+    let sync_flags: Vec<bool> = s.iter().map(|s| s.sync).collect();
+    assert_eq!(sync_flags, [false, true, true, true, false]);
+}
+
+#[test]
+fn trun_cto_is_signed_in_both_versions() {
+    for version in [0, 1] {
+        let f = one_moof(vec![traf(&[
+            tfhd(1, 0x2_0000, &[]),
+            trun(version, 0x800, 2, &[], &[-5i32 as u32, 7]),
+        ])]);
+        let m = parse(&f);
+        let s = samples(&m.tracks[0], &f);
+        assert_eq!(s.iter().map(|s| s.cto).collect::<Vec<_>>(), [-5, 7]);
+        assert_eq!(s[0].pts(), -5);
+    }
+}
+
+#[test]
+fn unknown_track_traf_is_kept_raw() {
+    let f = frag_file(1, &[trex(1, 1, 10, 4, 0)], |at, data| {
+        let off = (data - at) as u32;
+        moof(&[
+            traf(&[tfhd(9, 0x2_0000, &[]), trun(0, 0x1, 1, &[off], &[])]),
+            traf(&[
+                tfhd(1, 0x2_0000, &[]),
+                bx(b"senc", &[0; 4]),
+                trun(0, 0x1, 1, &[off], &[]),
+            ]),
+        ])
+    });
+    let m = parse(&f);
+    assert_eq!(m.tracks[0].sample_count, 1);
+    let traf_at = f.windows(4).position(|w| w == b"traf").unwrap() as u64 - 4;
+    assert!(
+        m.other_boxes
+            .iter()
+            .any(|(k, e)| k.0 == *b"traf" && e.offset == traf_at)
+    );
+    assert_eq!(
+        m.other_boxes
+            .iter()
+            .filter(|(k, _)| k.0 == *b"traf")
+            .count(),
+        1
+    );
+    // A child of the traf of a known track goes to that track.
+    assert!(m.tracks[0].other_boxes.iter().any(|(k, _)| k.0 == *b"senc"));
+}
+
+#[test]
+fn moof_before_moov() {
+    let ftyp = bx(b"ftyp", b"isom\0\0\0\0isom");
+    let tr = Trak::video(1, &[stts(&[]), stsc(&[]), stsz(&[]), stco(&[])]).build();
+    let m = moov(&[tr], &[bx(b"mvex", &trex(1, 1, 10, 4, 0))]);
+    let mk = |at: u64, data: u64| {
+        moof(&[traf(&[
+            tfhd(1, 0x2_0000, &[]),
+            trun(0, 0x1, 2, &[(data - at) as u32], &[]),
+        ])])
+    };
+    let at = ftyp.len() as u64;
+    let data = at + mk(0, 0).len() as u64 + m.len() as u64 + 8;
+    let mdat = bx(b"mdat", &[0; 400]);
+    let f = cat(&[&ftyp, &mk(at, data), &m, &mdat]);
+    let a = parse(&f);
+    assert_eq!(
+        spans(&samples(&a.tracks[0], &f)),
+        [(data, 4), (data + 4, 4)]
+    );
+    let b = read_movie(
+        Cursor::new(&f[..]),
+        &Limits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(a, b);
+}
+
+#[test]
+fn fragment_errors() {
+    let id = |id, flags: u32| tfhd(id, flags, &[]);
+    let run = || trun(0, 0, 1, &[], &[]);
+    let cases = [
+        // A moof when moov has no mvex.
+        (
+            cat(&[
+                &mp4(
+                    &moov(
+                        &[Trak::video(1, &[stts(&[]), stsc(&[]), stsz(&[]), stco(&[])]).build()],
+                        &[],
+                    ),
+                    10,
+                ),
+                &moof(&[]),
+            ]),
+            Error::Malformed("mvex"),
+        ),
+        // A traf of a track without trex.
+        (
+            frag_file(1, &[], |_, _| moof(&[traf(&[id(1, 0), run()])])),
+            Error::Malformed("trex"),
+        ),
+        (
+            frag_file(1, &[trex(1, 1, 1, 1, 0), trex(1, 1, 1, 1, 0)], |_, _| {
+                moof(&[])
+            }),
+            Error::Malformed("trex"),
+        ),
+        // Sample description 0 and past the entries.
+        (
+            one_moof(vec![traf(&[tfhd(1, 0x2, &[2]), run()])]),
+            Error::Malformed("tfhd"),
+        ),
+        (
+            one_moof(vec![traf(&[tfhd(1, 0x2, &[0]), run()])]),
+            Error::Malformed("tfhd"),
+        ),
+        (
+            one_moof(vec![traf(&[tfhd(0, 0, &[])])]),
+            Error::Malformed("tfhd"),
+        ),
+        // tfhd must be the first child.
+        (one_moof(vec![traf(&[run()])]), Error::Malformed("traf")),
+        (one_moof(vec![traf(&[])]), Error::Malformed("traf")),
+        // A count that its records cannot hold.
+        (
+            one_moof(vec![traf(&[id(1, 0), trun(0, 0x200, 1000, &[], &[1])])]),
+            Error::Malformed("trun"),
+        ),
+        // Samples without a size anywhere.
+        (
+            frag_file(1, &[trex(1, 1, 10, 0, 0)], |_, _| {
+                moof(&[traf(&[id(1, 0), trun(0, 0, 3, &[], &[])])])
+            }),
+            Error::Malformed("trun"),
+        ),
+        // base_data_offset + data_offset past u64.
+        (
+            one_moof(vec![traf(&[
+                tfhd(1, 0x1, &[u32::MAX, u32::MAX]),
+                trun(0, 0x1, 1, &[5], &[]),
+            ])]),
+            Error::Malformed("trun"),
+        ),
+        // A short box.
+        (
+            one_moof(vec![traf(&[id(1, 0), bx(b"trun", &[0; 6])])]),
+            Error::Malformed("trun"),
+        ),
+    ];
+    let (d, c) = (Limits::default(), AtomicBool::new(false));
+    for (i, (f, want)) in cases.into_iter().enumerate() {
+        assert_eq!(
+            parse_movie(&f, &d, &c).err(),
+            Some(want.clone()),
+            "case {i}"
+        );
+        assert_eq!(
+            read_movie(Cursor::new(&f[..]), &d, &c).err(),
+            Some(want),
+            "case {i} read"
+        );
+    }
+}
+
+#[test]
+fn fragment_sample_past_the_end_is_truncated() {
+    let f = frag_file(1, &[trex(1, 1, 10, 100_000, 0)], |_, _| {
+        moof(&[traf(&[tfhd(1, 0x2_0000, &[]), trun(0, 0, 2, &[], &[])])])
+    });
+    let m = parse(&f);
+    let w = walk(&m.tracks[0], &f);
+    assert_eq!(w, [Err(Error::Truncated)]);
+    assert_eq!(sync(&m.tracks[0], &f, 1).err(), Some(Error::Truncated));
+}
+
+#[test]
+fn moov_samples_continue_into_fragments() {
+    let ftyp = bx(b"ftyp", b"isom\0\0\0\0isom");
+    let mdat = bx(b"mdat", &[0; 400]);
+    let t = Trak::video(
+        1,
+        &[
+            stts(&[(4, 10)]),
+            stsc(&[(1, 2, 1)]),
+            stsz(&[3, 4, 5, 6]),
+            stco(&[28, 128]),
+            stss(&[1, 3]),
+        ],
+    );
+    let m = moov(&[t.build()], &[bx(b"mvex", &trex(1, 1, 10, 8, 0))]);
+    let at = (ftyp.len() + mdat.len() + m.len()) as u64;
+    // The fragment data are 3 samples of 8 bytes at 300, before the moof: a negative data_offset.
+    let off = (300 - at as i64) as i32 as u32;
+    let frag = moof(&[traf(&[
+        tfhd(1, 0x2_0000, &[]),
+        trun(0, 0x1 | 0x400, 3, &[off], &[0x10000, 0, 0x10000]),
+    ])]);
+    let f = cat(&[&ftyp, &mdat, &m, &frag]);
+    let m = parse(&f);
+    let t = &m.tracks[0];
+    assert_eq!(t.sample_count, 7);
+    let s = samples(t, &f);
+    assert_eq!(numbers(&s), [1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(
+        spans(&s),
+        [
+            (28, 3),
+            (31, 4),
+            (128, 5),
+            (133, 6),
+            (300, 8),
+            (308, 8),
+            (316, 8)
+        ]
+    );
+    // The first fragment sample starts where the stts deltas end.
+    assert_eq!(
+        s.iter().map(|s| s.dts).collect::<Vec<_>>(),
+        [0, 10, 20, 30, 40, 50, 60]
+    );
+    assert_eq!(s[3].flags, None);
+    assert_eq!(s[4].flags, Some(0x10000));
+    assert_eq!(numbers(&sync(t, &f, 10).unwrap()), [1, 3, 6]);
+    assert_eq!(numbers(&sync(t, &f, 2).unwrap()), [1, 3]);
+    assert_eq!(numbers(&sync(t, &f, 3).unwrap()), [1, 3, 6]);
+    for (time, want) in [(-1, 1), (19, 1), (20, 3), (49, 3), (50, 6), (1000, 6)] {
+        assert_eq!(at(t, &f, time), Some(want), "t = {time}");
+    }
+    let r = read_movie(
+        Cursor::new(&f[..]),
+        &Limits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(m, r);
+}
+
+#[test]
+fn fragment_limits_and_cancel() {
+    let (d, c) = (Limits::default(), AtomicBool::new(false));
+    // A moof larger than the moov: max_moov_bytes applies to each copied box.
+    let big = frag_file(1, &[trex(1, 1, 10, 4, 0)], |at, data| {
+        moof(&[traf(&[
+            tfhd(1, 0x2_0000, &[]),
+            trun(0, 0x1 | 0x100, 400, &[(data - at) as u32], &[10; 400]),
+        ])])
+    });
+    let at = big.windows(4).position(|w| w == b"moov").unwrap();
+    let moov_len = u32::from_be_bytes(big[at - 4..at].try_into().unwrap()) as usize;
+    let cap = Limits {
+        max_moov_bytes: moov_len,
+        ..d
+    };
+    assert!(parse_movie(&big, &cap, &c).is_ok());
+    assert_eq!(
+        read_movie(Cursor::new(&big[..]), &cap, &c).err(),
+        Some(Error::LimitExceeded(Limit::MoovBytes))
+    );
+    let roomy = Limits {
+        max_moov_bytes: moov_len + 3000,
+        ..d
+    };
+    assert_eq!(
+        parse_movie(&big, &roomy, &c).unwrap(),
+        read_movie(Cursor::new(&big[..]), &roomy, &c).unwrap()
+    );
+    // The runs are charged to max_alloc: fewer bytes make it fail, never anything else.
+    let plain = frag_file(1, &[trex(1, 1, 10, 4, 0)], |_, _| Vec::new());
+    let need = |f: &[u8]| {
+        (0..1usize << 16).step_by(8).find(|&a| {
+            let l = Limits { max_alloc: a, ..d };
+            match parse_movie(f, &l, &c) {
+                Ok(_) => true,
+                Err(e) => {
+                    assert_eq!(e, Error::LimitExceeded(Limit::Alloc), "max_alloc {a}");
+                    false
+                }
+            }
+        })
+    };
+    assert!(need(&big).unwrap() > need(&plain).unwrap());
+    // A walk charges its window of trun records.
+    let f = movie_frag();
+    let m = parse(&f);
+    let t = &m.tracks[0];
+    let tiny = Limits { max_alloc: 4, ..d };
+    assert_eq!(
+        t.samples(Cursor::new(&f[..]), &tiny, &c).next(),
+        Some(Err(Error::LimitExceeded(Limit::Alloc)))
+    );
+    assert_eq!(
+        t.sync_samples(Cursor::new(&f[..]), 2, &tiny, &c).err(),
+        Some(Error::LimitExceeded(Limit::Alloc))
+    );
+    // A cancel flag that is set stops the parse and the walks.
+    let stop = AtomicBool::new(true);
+    assert_eq!(parse_movie(&f, &d, &stop).err(), Some(Error::Cancelled));
+    assert_eq!(
+        read_movie(Cursor::new(&f[..]), &d, &stop).err(),
+        Some(Error::Cancelled)
+    );
+    assert_eq!(
+        t.samples(Cursor::new(&f[..]), &d, &stop).next(),
+        Some(Err(Error::Cancelled))
+    );
+}
+
+#[test]
+fn fuzz_seed_is_a_fragmented_file() {
+    for dir in ["movie", "movie_read"] {
+        let path = format!(
+            "{}/tests/fuzz/payload-seeds/{dir}/fragmented",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let f = std::fs::read(path).unwrap();
+        let m = parse(&f);
+        assert!(m.fragmented);
+        let t = &m.tracks[0];
+        assert_eq!(t.sample_count, 2);
+        let s = samples(t, &f);
+        assert_eq!(spans(&s), [(468, 4), (472, 4)]);
+        assert_eq!(s.iter().map(|s| s.dts).collect::<Vec<_>>(), [100, 110]);
+    }
+}

@@ -19,7 +19,7 @@ before they happen (`Budget::vec`).
 | `max_pixels` | 1 << 30 | ispe, grid and iovl width x height | max_image_size_pixels 32768 x 32768 |
 | `max_meta_bytes` | 64 MiB | size of the `meta` or `mini` box (and of the `ftyp` payload) that `read` copies; `parse` has no such cap | - |
 | `max_metadata_bytes` | 64 MiB | one Exif or XMP item returned by `metadata()` | max_memory_block_size 4 GiB |
-| `max_moov_bytes` | 64 MiB | size of the `moov` box (and `ftyp` payload) that `read_movie` copies; `parse_movie` has no such cap | - |
+| `max_moov_bytes` | 64 MiB | size of the `moov` box, of each `moof` box (and of the `ftyp` payload) that `read_movie` copies; `parse_movie` has no such cap | - |
 
 ## Why these values
 
@@ -33,15 +33,20 @@ before they happen (`Budget::vec`).
 ## MP4/MOV tracks
 
 - `max_moov_bytes` (64 MiB) is an estimate: a 2-hour 60 fps file with B-frames and AAC has about 10 MB of
-  `moov`. Only `read_movie` copies the box; `parse_movie` works on the caller's bytes.
+  `moov`. Only `read_movie` copies the boxes, `moov` and then each `moof` in turn (the copy is given back
+  after its parse); `parse_movie` works on the caller's bytes.
 - The sample tables are not decoded: a track costs the same memory whatever its sample count. A walk
-  (`samples`, `sync_samples`, `sync_sample_at`) charges up to 6 windows of 4 KiB to `max_alloc`, and
-  `sync_samples` charges its result Vec for `min(n, sync samples)` samples. The growing `Vec`s of the
-  parse (tracks, entries, `other_boxes`) use the doubling charge of `meta/mod.rs`.
+  (`samples`, `sync_samples`, `sync_sample_at`) charges up to 7 windows of 4 KiB to `max_alloc` (the seventh
+  reads the `trun` records of the current fragment run), and `sync_samples` charges its result Vec for
+  `min(n, sync samples)` samples. The growing `Vec`s of the parse (tracks, entries, `other_boxes`, `trex`
+  list, `moof` headers, fragment runs of about 80 bytes each) use the doubling charge of `meta/mod.rs`.
 - `max_properties` counts the children of the sample entries of all tracks together.
 - A walk's time is bounded by the table bytes of the file, the file size (a sample is at least one byte
   and must lie inside the file) and the cancel flag (checked at each window refill and every 4096
-  samples).
+  samples). Fragment runs may overlap in the file, so the number of fragment samples is bounded by
+  the run counts (a `trun` with no per-sample size needs a non-zero default size) and not by the file
+  size; only the cancel flag bounds a walk to the end of such a file. Parsing sums each `trun` once,
+  checking the cancel flag every 4096 records.
 
 ## Compared with libheif
 

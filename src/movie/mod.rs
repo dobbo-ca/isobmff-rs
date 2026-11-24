@@ -1,7 +1,8 @@
-//! MP4/MOV tracks: `moov` with its sample tables, kept as ranges of the file and walked on
-//! demand ([`Track::samples`], [`Track::sync_samples`], [`Track::sync_sample_at`]). Non-fragmented
-//! files only: `mvex` sets [`Movie::fragmented`] and `moof` boxes stay in [`Movie::other_boxes`].
+//! MP4/MOV tracks: `moov` with its sample tables, and the movie fragments (`moof`) of a file with
+//! `mvex`, kept as ranges of the file and walked on demand ([`Track::samples`],
+//! [`Track::sync_samples`], [`Track::sync_sample_at`]).
 
+mod frag;
 mod stbl;
 mod walk;
 
@@ -33,11 +34,13 @@ pub struct Movie {
     pub duration: u64,
     /// One entry per `trak`, in file order.
     pub tracks: Vec<Track>,
-    /// `moov` has an `mvex`: the file has movie fragments. This version does not read them.
+    /// `moov` has an `mvex`: the file has movie fragments. Their samples are in the tracks.
     pub fragmented: bool,
-    /// Every top-level box and `moov` child that is not parsed (`mdat`, `free`, `udta`, `meta`,
-    /// `mvex`, `moof`, `uuid`, ...), type and whole-box range, in file order. The first `ftyp`
-    /// and the `moov` box itself are not listed.
+    /// Every top-level box, `moov` child and `moof` child that is not parsed (`mdat`, `free`,
+    /// `udta`, `meta`, `mvex`, `sidx`, `mfhd`, a `traf` of a track that is not in `moov`, `uuid`,
+    /// ...), type and whole-box range, in file order, except that the children of the `moof`
+    /// boxes come last (they are parsed after `moov`). The first `ftyp` and the `moov` and `moof`
+    /// boxes themselves are not listed.
     pub other_boxes: Vec<(FourCc, Extent)>,
     /// Boxes visited and the deepest nesting.
     pub stats: Stats,
@@ -86,15 +89,22 @@ pub struct Track {
     pub entries: Vec<SampleEntry>,
     /// The `elst` entries (none without `elst`). The walks do not apply them.
     pub edits: Vec<Edit>,
-    /// The `stsz` or `stz2` sample count.
+    /// The `stsz` or `stz2` sample count plus the samples of every `trun` of its fragments.
     pub sample_count: u64,
     /// The parsed `stbl` tables (`stts ctts stss stsc stsz stz2 stco co64`), type and whole-box
     /// range, in file order.
     pub tables: Vec<(FourCc, Extent)>,
     /// Every other box under `trak` that is not parsed (`udta`, `tref`, `dinf`, `vmhd`, `sdtp`,
-    /// `sgpd`, ...), type and whole-box range, in file order.
+    /// `sgpd`, ...) and every other child of its `traf` boxes (`senc`, `saiz`, ...), type and
+    /// whole-box range, in file order.
     pub other_boxes: Vec<(FourCc, Extent)>,
     st: Stbl,
+    /// The `trex` defaults of `mvex`.
+    trex: Option<frag::Trex>,
+    /// One per `trun` of the fragments, in file order.
+    runs: Vec<frag::Run>,
+    /// The decode time where the last run ends (the `stts` total before any run).
+    end_dts: i64,
 }
 
 /// One `stsd` entry.
@@ -152,7 +162,7 @@ pub struct Sample {
     pub sync: bool,
     /// Sample description index (1-based) into [`Track::entries`].
     pub entry: u32,
-    /// Resolved fragment sample flags. Always `None` for the samples of `moov`.
+    /// Resolved fragment sample flags (`trun`, `tfhd`, `trex`). `None` for the samples of `moov`.
     pub flags: Option<u32>,
 }
 
@@ -177,11 +187,13 @@ struct Top {
     moov: Option<Moov>,
     moov_seen: bool,
     other: Vec<(FourCc, Extent)>,
+    /// Every top-level `moof`, parsed after the walk (a `moof` may come before `moov`).
+    moofs: Vec<BoxHeader>,
 }
 
 impl Top {
-    /// Sorts `h`: the first `ftyp` and the first `moov` are for the caller to parse; anything
-    /// else is kept as a range. A second `moov` is `Malformed`.
+    /// Sorts `h`: the first `ftyp` and the first `moov` are for the caller to parse, a `moof` is
+    /// noted for later; anything else is kept as a range. A second `moov` is `Malformed`.
     fn note(&mut self, budget: &Budget<'_>, h: &BoxHeader) -> Result<Kind, Error> {
         match &h.kind.0 {
             b"ftyp" if !self.ftyp_seen => {
@@ -194,6 +206,10 @@ impl Top {
                 }
                 self.moov_seen = true;
                 Ok(Kind::Moov)
+            }
+            b"moof" => {
+                push(budget, &mut self.moofs, *h)?;
+                Ok(Kind::Other)
             }
             _ => {
                 keep(budget, &mut self.other, h)?;
@@ -222,8 +238,9 @@ fn first_box_ok(kind: Option<&[u8]>) -> bool {
 
 /// Parses the tracks of an MP4, MOV, 3GP or AVIS file held in memory: `moov` with every `trak`,
 /// its sample entries, edit list and sample tables. The tables stay in the file; the walks on
-/// [`Track`] read them. `parse` and `read` (the HEIF item graph) are unchanged: call both for an
-/// AVIS file when both views are wanted.
+/// [`Track`] read them. With `mvex`, every top-level `moof` is parsed too (after `moov`, in file
+/// order): its runs of samples continue the tracks. `parse` and `read` (the HEIF item graph) are
+/// unchanged: call both for an AVIS file when both views are wanted.
 ///
 /// Limits enforced: `max_alloc`, `max_boxes`, `max_depth`, `max_properties` (children of sample
 /// entries, all together); the cancel flag every 1024 boxes.
@@ -234,7 +251,8 @@ fn first_box_ok(kind: Option<&[u8]>) -> bool {
 /// pnot`; [`Error::NoMoov`] without a `moov`; [`Error::Truncated`] when a top-level box before
 /// `moov` runs past the end of `data` (after `moov`, a damaged tail ends the walk);
 /// [`Error::Unsupported`] for `cmov`; [`Error::Malformed`] for an invalid box (two `moov`, a
-/// missing or duplicate required box, a table whose count does not fit its box, ...);
+/// missing or duplicate required box, a table whose count does not fit its box, a `moof` without
+/// `mvex`, a `traf` without `trex` or a `trun` whose records do not fit its box, ...);
 /// [`Error::LimitExceeded`]; [`Error::OutOfMemory`]; [`Error::Cancelled`].
 pub fn parse_movie(data: &[u8], limits: &Limits, cancel: &AtomicBool) -> Result<Movie, Error> {
     let budget = Budget::new(limits, cancel);
@@ -264,6 +282,11 @@ pub fn parse_movie(data: &[u8], limits: &Limits, cancel: &AtomicBool) -> Result<
             Kind::Other => {}
         }
     }
+    if let Some(m) = top.moov.as_mut() {
+        for h in &top.moofs {
+            frag::parse_moof(&ctx, h, m.fragmented, &mut m.tracks, &mut top.other)?;
+        }
+    }
     let stats = Stats {
         boxes: ctx.boxes.get(),
         max_depth: ctx.max_depth.get(),
@@ -272,9 +295,9 @@ pub fn parse_movie(data: &[u8], limits: &Limits, cancel: &AtomicBool) -> Result<
 }
 
 /// Parses the tracks of an MP4, MOV, 3GP or AVIS file from a reader. It reads the top-level box
-/// headers, `ftyp` and the whole `moov` box (at most `limits.max_moov_bytes`, charged to
-/// `max_alloc` while it is parsed) and seeks over `mdat`. The result equals [`parse_movie`] on
-/// the same bytes. The walks on [`Track`] need the reader again.
+/// headers, `ftyp`, the whole `moov` box and then each `moof` box in turn (each at most
+/// `limits.max_moov_bytes`, charged to `max_alloc` while it is parsed) and seeks over `mdat`.
+/// The result equals [`parse_movie`] on the same bytes. The walks on [`Track`] need the reader again.
 ///
 /// Limits enforced: those of [`parse_movie`] and `max_moov_bytes`.
 ///
@@ -343,6 +366,24 @@ pub fn read_movie<R: Read + Seek>(
             Kind::Other => {}
         }
         pos = h.end;
+    }
+    if let Some(m) = top.moov.as_mut() {
+        for h in &top.moofs {
+            let len = copy_len(h.end.saturating_sub(h.start), limits)?;
+            let bytes = read_vec(&mut r, &budget, h.start, len)?;
+            let src = Src {
+                bytes: &bytes,
+                base: h.start,
+                file_len,
+            };
+            let ctx = Ctx::new(&src, &budget, limits);
+            ctx.boxes.set(walk.boxes.get());
+            ctx.max_depth.set(walk.max_depth.get());
+            frag::parse_moof(&ctx, h, m.fragmented, &mut m.tracks, &mut top.other)?;
+            walk.boxes.set(ctx.boxes.get());
+            walk.max_depth.set(ctx.max_depth.get());
+            budget.release(len);
+        }
     }
     let stats = Stats {
         boxes: walk.boxes.get(),
@@ -413,6 +454,7 @@ fn parse_moov(
         fragmented: false,
     };
     let mut mvhd = None;
+    let mut trexes = Vec::new();
     let mut props: usize = 0;
     let mut boxes = Boxes::new(ctx, h.payload(), 1, false)?;
     while let Some(c) = boxes.next_box()? {
@@ -430,12 +472,16 @@ fn parse_moov(
             b"mvex" => {
                 m.fragmented = true;
                 keep(ctx.budget, other, &c)?;
+                frag::parse_mvex(ctx, &c, &mut trexes)?;
             }
             _ => keep(ctx.budget, other, &c)?,
         }
     }
     (m.timescale, m.duration) = mvhd.unwrap_or((0, 0));
     unique_ids(ctx.budget, &m.tracks)?;
+    if m.fragmented {
+        frag::finish_moov(ctx, trexes, &mut m.tracks)?;
+    }
     Ok(m)
 }
 
@@ -850,6 +896,9 @@ fn parse_trak(ctx: &Ctx<'_>, h: &BoxHeader, props: &mut usize) -> Result<Track, 
         tables,
         other_boxes: other,
         st: md.st,
+        trex: None,
+        runs: Vec::new(),
+        end_dts: 0,
     })
 }
 

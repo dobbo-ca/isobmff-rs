@@ -41,8 +41,9 @@ pub struct Limits {
     /// The largest Exif or XMP item that [`Heif::metadata`](crate::Heif::metadata) returns
     /// (default 64 MiB). [`Limit::MetadataBytes`](crate::Limit::MetadataBytes).
     pub max_metadata_bytes: usize,
-    /// The largest `moov` box (and `ftyp` payload) that [`read_movie`](crate::read_movie) copies
-    /// (default 64 MiB). [`Limit::MoovBytes`](crate::Limit::MoovBytes).
+    /// The largest `moov` box and the largest `moof` box (and `ftyp` payload) that
+    /// [`read_movie`](crate::read_movie) copies (default 64 MiB).
+    /// [`Limit::MoovBytes`](crate::Limit::MoovBytes).
     pub max_moov_bytes: usize,
 }
 

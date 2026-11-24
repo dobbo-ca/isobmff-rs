@@ -140,13 +140,13 @@ track <id> handler=<4cc> timescale=<u32> samples=<n> entries=<4cc,...> config=<4
 s <id> <n> <pos> <size> <dts-dts(first sample)> <pts> <K|_>      (gated tracks only, every sample)
 at <id> <j> <number|none>                                         (gated tracks, j = 0..17)
 e <id> <class>                                                    (walk error; no more s/at lines)
-skip <id> <reason>                                                (track not gated: `avif`, `fragmented`, `handler` or `entry`)
+skip <id> <reason>                                                (track not gated: `avif`, `handler` or `entry`)
 ```
 
 - **Gated tracks.** Handler `vide` or `pict`. A track where any sample has `entry` other than 1 is
   `skip <id> entry`, because ffmpeg drops those samples (`mov.c:4206`). Other handlers are
   `skip <id> handler`.
-- **Skipped files.** Two kinds of file are `skip <id> <why>` for every track, whatever its handler,
+- **Skipped files.** One kind of file is `skip <id> <why>` for every track, whatever its handler,
   so that no `s` line of any track is compared (`mp4cmp.awk` compares only the ids with an `s` or
   `e` line in ours, and ignores what ffprobe prints for the others; a file whose tracks are all
   skipped is not in gate 5 at all, nor in the count of 5d):
@@ -156,10 +156,10 @@ skip <id> <reason>                                                (track not gat
     `7523-7640`); where `moov` comes first the header read fails (`4470`). So
     ffprobe shows a still image where isobmff-rs shows the tracks of the sequence. Exact rule
     (`strncmp(type, "avif", 4)`).
-  - `fragmented`: the file has a top-level `moof`. ffprobe reads the
-    fragments, isobmff-rs does not yet. PR D (fragments) removes this skip.
 - `s`: `pos` and `size` are the file range of the sample, `dts` is rebased to the first sample (ffmpeg
-  shifts it by a per-stream amount), `pts = dts + cto` of the raw tables, `K` is `Sample::sync`.
+  shifts it by a per-stream amount), `pts = dts + cto` of the raw tables or of the `trun` records, `K` is `Sample::sync`.
+  Fragmented files are gated like the others: `ffprobe-tracks.sh` runs with `-use_tfdt 1`, `-use_mfra_for auto`
+  and `-ignore_editlist 1`, and the samples of the `moof` boxes follow those of `moov` in `s` and `at`.
 - **Probes.** Let `m = 1 + floor((count - 1) * floor(j / 2) / 8)` for j = 0..17. Probe `t_j` is
   `pts(m) - 1` for even j and `pts(m)` for odd j. Each `at` line is `Track::sync_sample_at(t_j)` on
   our side. On the ffprobe side the awk script takes, among the packets with `K`, the greatest
@@ -170,8 +170,10 @@ skip <id> <reason>                                                (track not gat
   | Mask (`-`) | When |
   |---|---|
   | `K` and every `at` | the whole track, when there is an empty `stss`, a `stps`, or an `sbgp` with grouping_type `rap ` (ffmpeg's K comes from those too: `mov.c:4167-4188`) |
-  | `pts` and every `at` | a track whose `ctts` has a count of 0 or >= 2^31, an entry with offset magnitude above 2^28, or a total below `sample_count` (`mov.c:3158-3183`, `8842-8856`; the oracle masks every entry, ffmpeg only the ones before the last two) |
+  | `pts` and every `at` | a track whose `ctts` has a count of 0 or >= 2^31, an entry with offset magnitude above 2^28, or a total below the number of `moov` samples (`mov.c:3158-3183`, `8842-8856`; the oracle masks every entry, ffmpeg only the ones before the last two) |
   | `dts` and `pts` | a track with any `stts` delta above `0xFFF8ACFF` (ffmpeg clips it: `mov.c:3039-3047`, `9144`) |
+  | `K` of one sample (and every `at` of the track) | a fragment sample that is sync by its flags but has depends_on bit `0x0100_0000` set (ffmpeg's keyframe rule: `!(flags & (non-sync | depends-yes))`, `mov.c:5198-5203`) |
+  | `pts` and every `at` | a track with fragment samples and any negative cto (ffmpeg's dts_shift is not cancelled for `trun` samples: `mov.c:5179`) |
 
 - **Why the fields are comparable.** ffmpeg sets index dts to `raw - dts_shift` (`mov.c:4102`) and pts
   to `dts + dts_shift + ctts` (`mov.c:8842`), so pts equals our `dts + cto` exactly. dts is compared
@@ -260,9 +262,12 @@ the corpus gate says if one still differs):
      prints the count, so the default can be raised to the first green run.
    The mismatches are `mp4.diff` (5a) and `mp4-mut.diff` (5b). Expected known differences, to list
    rather than mask once a run shows them: external `url ` drefs (ours `Unsupported`, ffmpeg reads
-   the main file, so only the samples before ours stops are compared), several `trun` boxes
-   without data_offset and fragments with `sidx` but no `tfdt` (ffmpeg takes the sidx time; both are
-   fragments, next step), `cmov`. Listed so far (side `mp4`): a file with a track whose samples lie
+   the main file, so only the samples before ours stops are compared), several `trun` boxes of one `traf`
+   without data_offset (ffmpeg restarts each at the base, `int data_offset = 0`, `mov.c:5003`; we continue after the
+   previous run, as the standard says), fragments with `sidx` but no `tfdt` (ffmpeg takes the sidx time,
+   `mov.c:5079-5093`; we take the end of the previous run), a hybrid track (`moov` samples plus fragments)
+   with a negative cto, `cmov`. A `tfhd` of a track without `trex` is `Malformed("trex")` here (ffmpeg ignores
+   the `traf`), a `trun` of size 0 and a `moof` without `mvex` are errors here. Listed so far (side `mp4`): a file with a track whose samples lie
    past the end of the file (ffmpeg interleaves the tracks and stops reading at the first sample it
    cannot read, `mov.c:8589-8613`, `8801`): `maf/vsaf/1.mp4`.
 

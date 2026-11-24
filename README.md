@@ -49,7 +49,7 @@ for s in &first { println!("{} {:?} dts {} pts {}", s.number, s.range, s.dts, s.
 ```
 
 The sample tables stay in the file and are walked on demand, so a track costs the same memory whatever its
-sample count. Movie fragments (`moof`) are not read yet. Details: [design](docs/design.md), "MP4/MOV tracks".
+sample count. Fragmented files (`mvex`, `moof`) give their samples in the same walks. Details: [design](docs/design.md), "MP4/MOV tracks".
 
 ## Resource limits
 
@@ -69,7 +69,7 @@ Details and rationale: [docs/limits.md](docs/limits.md).
 | `max_pixels` | 1 << 30 | width x height | `Pixels` |
 | `max_meta_bytes` | 64 MiB | bytes of `meta` (or `mini`) copied by `read` | `MetaBytes` |
 | `max_metadata_bytes` | 64 MiB | bytes of one Exif or XMP item | `MetadataBytes` |
-| `max_moov_bytes` | 64 MiB | bytes of `moov` copied by `read_movie` | `MoovBytes` |
+| `max_moov_bytes` | 64 MiB | bytes of `moov`, and of each `moof`, copied by `read_movie` | `MoovBytes` |
 
 - Each limit returns `Error::LimitExceeded(Limit::...)`. No thread is ever spawned: `max_threads = 1` and every other value run on the calling thread.
 - Set the cancel flag from another thread: the call returns `Error::Cancelled`.
