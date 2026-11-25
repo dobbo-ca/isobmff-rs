@@ -9,7 +9,7 @@ AVIS files it gives the tracks and the byte ranges of their keyframes ("MP4/MOV 
 This page is the spec. Code, tests, oracles and docs follow it. When the code must differ, change
 this page in the same PR.
 
-## Rules (from rust-ports docs/conventions.md)
+## Rules
 
 - Package `isobmff`, edition 2024, toolchain 1.99.1, `Cargo.lock` committed, no dependencies.
 - `#![forbid(unsafe_code)]`. A container parser has no SIMD kernel and no hot loop that needs

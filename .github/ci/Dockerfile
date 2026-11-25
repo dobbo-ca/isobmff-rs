@@ -1,14 +1,19 @@
-# CI image: Rust runs here, on the in-cluster BuildKit, because the ARC runner has no toolchain.
+# CI image: Rust runs here, built with docker buildx on GitHub-hosted runners (ubuntu-24.04 for
+# x86_64, ubuntu-24.04-arm for the native arm64 stages).
 # The crate has no dependencies and no private git deps, so no step needs a token. The only fetch
 # is the fuzz crate's own dependency (libfuzzer-sys from crates.io); every later step runs offline.
 # Every tool is installed in a stage before `COPY . .`, so a new commit does not install it again,
 # and the fetch runs from the manifests and lockfiles alone.
 FROM rust:1.99.1-bookworm AS toolchain
-# gcc-aarch64-linux-gnu: the linker of `cargo build --target aarch64-unknown-linux-gnu`.
+ARG TARGETARCH
+# On x86_64, gcc-aarch64-linux-gnu is the linker of `cargo build --target aarch64-unknown-linux-gnu`
+# (the aarch64 lint and link check in `ci`). On arm64 that target is the host: no cross toolchain.
 RUN rustup component add rustfmt clippy && rustup target add aarch64-unknown-linux-gnu \
-    && apt-get update && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
-    && rm -rf /var/lib/apt/lists/*
-ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+    && if [ "$TARGETARCH" = amd64 ]; then \
+         apt-get update && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+         && rm -rf /var/lib/apt/lists/* \
+         && printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' >> "$CARGO_HOME/config.toml"; \
+       fi
 WORKDIR /src
 # The manifests and lockfiles of the crate and of the fuzz crate, with stub targets, so the fetch
 # is a layer that only a change to them rebuilds. The fuzz crate depends on the crate by path.
@@ -47,19 +52,14 @@ RUN find src examples tests -name '*.rs' -exec touch {} + \
 RUN --mount=type=cache,id=isobmff-rs-target-ci,sharing=locked,target=/src/target \
     find src examples tests -name '*.rs' -exec touch {} + && cargo build --locked --release --target aarch64-unknown-linux-gnu --examples
 
-# qemu-user, for the arm64 stages (the cross gcc is in `toolchain`).
-FROM toolchain AS qemu-tools
-RUN apt-get update && apt-get install -y --no-install-recommends qemu-user \
-    && rm -rf /var/lib/apt/lists/*
-ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64 -L /usr/aarch64-linux-gnu" \
-    CARGO_NET_OFFLINE=true
-
-FROM qemu-tools AS qemu-arm64
+# The arm64 stages are built natively on an arm64 runner (ubuntu-24.04-arm): no emulator.
+FROM toolchain AS native-arm64
+ENV CARGO_NET_OFFLINE=true
 COPY . .
 
-# The library tests on aarch64 under qemu-user. The parser is portable (no SIMD), so one run is
-# enough; the rest of the suite runs natively in `ci`.
-FROM qemu-arm64 AS arm64
+# The library tests on aarch64. The parser is portable (no SIMD), so one run is enough; the rest
+# of the suite runs in `ci`.
+FROM native-arm64 AS arm64
 RUN --mount=type=cache,id=isobmff-rs-target-arm64,sharing=locked,target=/src/target \
     find src examples tests -name '*.rs' -exec touch {} + \
     && cargo test --locked --target aarch64-unknown-linux-gnu --lib
@@ -208,15 +208,19 @@ RUN --mount=type=cache,id=isobmff-rs-data,target=/data,sharing=locked,readonly \
 FROM scratch AS transform-report
 COPY --from=transform /report /
 
-# The oracle built for aarch64, run under qemu-user on the libheif and libavif test data, compared
-# with the x86_64 trees above.
-FROM qemu-arm64 AS parity-arm64
+# The x86_64 reference trees as a build output (job parity-ref uploads them for parity-arm64).
+FROM scratch AS x86-ref-out
+COPY --from=x86-ref /ref /
+
+# The oracle built natively for aarch64, run on the libheif and libavif test data, compared with
+# the x86_64 trees of `x86-ref-out`. The workflow passes them as the named build context `x86ref`.
+FROM native-arm64 AS parity-arm64
 COPY --from=data /data.list /data.list
 RUN --mount=type=cache,id=isobmff-rs-target-arm64,sharing=locked,target=/src/target \
     find src examples tests -name '*.rs' -exec touch {} + \
     && cargo build --locked --release --target aarch64-unknown-linux-gnu --example oracle \
     && cp target/aarch64-unknown-linux-gnu/release/examples/oracle /usr/local/bin/isobmff-oracle-arm64
-RUN --mount=type=bind,from=x86-ref,source=/ref,target=/ref,rw \
+RUN --mount=type=bind,from=x86ref,target=/ref,rw \
     --mount=type=cache,id=isobmff-rs-data,target=/data,sharing=locked,readonly \
     sh tests/parity/run.sh arm /ref
 

@@ -8,10 +8,10 @@
 #   run.sh full <report-dir>     gates 1-5 of docs/parity.md; the report is summary.md, *.diff and
 #                                a `status` written by the caller (0 only when every gate passed)
 #   run.sh ref <out-dir>         isobmff-oracle (x86_64) on the libheif and libavif test data
-#   run.sh arm <ref-dir>         the aarch64 isobmff-oracle under qemu-user on the same files,
+#   run.sh arm <ref-dir>         the aarch64 isobmff-oracle (native arm64) on the same files,
 #                                compared with <ref-dir>
 # Binaries on PATH: isobmff-oracle (examples/oracle.rs), heif-oracle, avif-oracle (tests/parity/c);
-# for `arm` /usr/local/bin/isobmff-oracle-arm64, run by $ARM_RUN; for gate 5 ffprobe and gawk.
+# for `arm` /usr/local/bin/isobmff-oracle-arm64; for gate 5 ffprobe and gawk.
 # Environment: PARITY_MIN_INPUTS (default 600): the HEIF and AVIF corpus has about 634 files
 # (corpus.toml), so a source that did not arrive fails gate 4 instead of shrinking the gates.
 # PARITY_MIN_MP4 (default 100): the least number of corpus files with a gated MP4 video track.
@@ -360,8 +360,8 @@ arm() {
   REP=$1 bad=0
   rm -rf $W; subset $W/in || return 1
   mkdir -p $W/heif $W/avif
-  run ${ARM_RUN:-qemu-aarch64 -L /usr/aarch64-linux-gnu} /usr/local/bin/isobmff-oracle-arm64 heif --threads 1 $W/in $W/heif
-  run ${ARM_RUN:-qemu-aarch64 -L /usr/aarch64-linux-gnu} /usr/local/bin/isobmff-oracle-arm64 avif $W/in $W/avif
+  run /usr/local/bin/isobmff-oracle-arm64 heif --threads 1 $W/in $W/heif
+  run /usr/local/bin/isobmff-oracle-arm64 avif $W/in $W/avif
   for k in heif avif; do
     if diff -rq "$REP/$k" $W/$k > $W/d; then echo "aarch64 $k: identical to x86_64 ($(ls $W/$k | wc -l) inputs)"
     else echo "aarch64 $k: DIFF"; head -n 50 $W/d; bad=1; fi
