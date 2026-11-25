@@ -132,12 +132,16 @@ RUN gcc -O2 -std=gnu99 -Wall -c -o /tmp/transform_oracle.o /c/transform_oracle.c
 # never changed) reaches the layer, so branches with different corpus.toml files share the cache
 # without seeing each other's files; the stages that read the corpus mount the same cache
 # and depend on this stage through that list. git-lfs is for the LFS sources.
+# A cache mount is not saved to the Actions cache, and each hosted job starts a new builder, so the
+# mount is empty there. CORPUS_RUN (the workflow run id) makes the fetch run again in each build,
+# so a fetch layer restored from the Actions cache never leaves the readers with an empty mount.
 FROM debian:bookworm-slim AS data
 RUN apt-get update && apt-get install -y --no-install-recommends git git-lfs ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY tests/parity/fetch.sh tests/parity/corpus.toml /parity/
+ARG CORPUS_RUN=0
 RUN --mount=type=cache,id=isobmff-rs-data,target=/data,sharing=locked \
-    sh /parity/fetch.sh /parity/corpus.toml /data /data.list \
+    echo "corpus run $CORPUS_RUN" && sh /parity/fetch.sh /parity/corpus.toml /data /data.list \
     && cat /data.list
 
 # The reference trees of isobmff-rs on the libheif and libavif test data (x86_64, one thread):

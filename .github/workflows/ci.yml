@@ -66,6 +66,7 @@ jobs:
           context: .
           file: .github/ci/Dockerfile
           target: parity-report
+          build-args: CORPUS_RUN=${{ github.run_id }}-${{ github.run_attempt }}
           push: false
           outputs: type=local,dest=parity-out
           cache-from: type=gha,scope=isobmff-rs-parity
@@ -88,6 +89,7 @@ jobs:
           context: .
           file: .github/ci/Dockerfile
           target: transform-report
+          build-args: CORPUS_RUN=${{ github.run_id }}-${{ github.run_attempt }}
           push: false
           outputs: type=local,dest=transform-out
           cache-from: type=gha,scope=isobmff-rs-transform
@@ -117,6 +119,7 @@ jobs:
           context: .
           file: .github/ci/Dockerfile
           target: x86-ref-out
+          build-args: CORPUS_RUN=${{ github.run_id }}-${{ github.run_attempt }}
           push: false
           outputs: type=local,dest=parity-ref
           cache-from: type=gha,scope=isobmff-rs-parity-ref
@@ -147,6 +150,7 @@ jobs:
           context: .
           file: .github/ci/Dockerfile
           target: parity-arm64
+          build-args: CORPUS_RUN=${{ github.run_id }}-${{ github.run_attempt }}
           build-contexts: x86ref=${{ runner.temp }}/x86ref
           push: false
           outputs: type=cacheonly
