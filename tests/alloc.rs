@@ -131,45 +131,109 @@ fn many_links(link: &[u8; 4], kind: &[u8; 4]) -> Vec<u8> {
     s.build()
 }
 
+/// An overlay (1) of 65 536 inputs with 2 `dimg` ids.
+fn overlay_dimg() -> Vec<u8> {
+    let mut s = Spec::new(b"heic");
+    let small = s.prop(ispe(64, 64));
+    let cfg = s.prop(hvcc());
+    let canvas = s.prop(ispe(100, 80));
+    let mut d = vec![0u8; 10];
+    d.extend_from_slice(&[0, 100, 0, 80]);
+    d.resize(d.len() + 4 * 65_536, 0);
+    s.item(1, b"iovl").data(&d).assoc(&[canvas]);
+    s.hevc(2, small, cfg).hidden();
+    s.hevc(3, small, cfg).hidden();
+    s.link(b"dimg", 1, &[2, 3]);
+    s.build()
+}
+
+/// Tmap items with a `dimg` to image 1 and to a gain map image (2), none in an `altr` group,
+/// and `ALTR` `altr` groups that hold image 1.
+const TMAPS: u32 = 5_000;
+const ALTR: u32 = 200_000;
+fn tmaps_and_groups() -> Vec<u8> {
+    let mut s = Spec::new(b"avif");
+    let size = s.prop(ispe(64, 48));
+    let cfg = s.prop(av1c());
+    s.av1(1, size, cfg);
+    s.av1(2, size, cfg).hidden();
+    for t in 3..3 + TMAPS {
+        // Version 1: a version this crate does not read, so `Tmap(None)`.
+        s.item(t, b"tmap").data(&[1]);
+        s.link(b"dimg", t, &[1, 2]);
+    }
+    for g in 0..ALTR {
+        s.group(b"altr", 100_000 + g, &[1]);
+    }
+    s.build()
+}
+
+/// Notes a case over its bound; the test fails at the end, after every case ran.
+fn bound(over: &mut Vec<String>, what: &str, used: usize) {
+    if used >= SMALL {
+        over.push(format!("{what}: {used} bytes"));
+    }
+}
+
 #[test]
 fn id_lists_are_bounded_by_the_items_not_the_references() {
+    let mut over = Vec::new();
+
     let file = grid_dimg();
     let heif = parse(&file);
     let (r, used) = peak(|| heif.image(1));
     assert_eq!(r.err(), Some(Error::Malformed("grid")));
-    assert!(used < SMALL, "grid with 983 073 dimg ids: {used} bytes");
+    bound(&mut over, "grid with 983 073 dimg ids", used);
 
     let file = iden_dimg();
     let heif = parse(&file);
     let (r, used) = peak(|| heif.image(2));
     assert_eq!(r.err(), Some(Error::Malformed("iden")));
-    assert!(used < SMALL, "iden with 983 025 dimg ids: {used} bytes");
+    bound(&mut over, "iden with 983 025 dimg ids", used);
+
+    let file = overlay_dimg();
+    let heif = parse(&file);
+    let (r, used) = peak(|| heif.image(1));
+    assert_eq!(r.err(), Some(Error::Malformed("iovl")));
+    bound(&mut over, "overlay of 65 536 inputs with 2 dimg ids", used);
 
     let file = many_links(b"thmb", b"hvc1");
     let heif = parse(&file);
     let (r, used) = peak(|| heif.image(1));
     assert_eq!(r.unwrap().thumbnails, [2]);
-    assert!(used < SMALL, "{MANY} thmb references: {used} bytes");
+    bound(&mut over, "200 000 thmb references", used);
 
     let file = many_links(b"auxl", b"hvc1");
     let heif = parse(&file);
     let (r, used) = peak(|| heif.image(1));
     assert_eq!(r.unwrap().aux.iter().map(|a| a.id).collect::<Vec<_>>(), [2]);
-    assert!(used < SMALL, "{MANY} auxl references: {used} bytes");
+    bound(&mut over, "200 000 auxl references", used);
 
     let file = many_links(b"cdsc", b"Exif");
     let heif = parse(&file);
     let (r, used) = peak(|| heif.image(1));
     assert_eq!(r.unwrap().exif, [2]);
-    assert!(used < SMALL, "{MANY} cdsc references: {used} bytes");
+    bound(&mut over, "200 000 cdsc references", used);
     let c = AtomicBool::new(false);
     let (r, used) = peak(|| {
         heif.metadata(&file, 1, &Limits::default(), &c)
             .map(|m| m.exif)
     });
     assert!(r.unwrap().is_some());
-    assert!(
-        used < SMALL,
-        "metadata, {MANY} cdsc references: {used} bytes"
-    );
+    bound(&mut over, "metadata, 200 000 cdsc references", used);
+
+    // The gain map search walks the groups of each candidate, not the groups of the image once
+    // per candidate (5 000 x 200 000 steps): well under a second, also in a debug build.
+    let file = tmaps_and_groups();
+    let heif = parse(&file);
+    let t = std::time::Instant::now();
+    assert_eq!(heif.image(1).unwrap().gain_map, None);
+    let took = t.elapsed();
+    if took.as_millis() >= 1_000 {
+        over.push(format!(
+            "gain map search over {TMAPS} tmaps, {ALTR} groups: {took:?}"
+        ));
+    }
+
+    assert!(over.is_empty(), "over the bound:\n{}", over.join("\n"));
 }
