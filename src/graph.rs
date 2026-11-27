@@ -151,8 +151,8 @@ pub struct Heif {
     altr: Vec<(u32, u32, u32)>,
 }
 
-/// The `max_alloc` a parse kept. Not part of the value: two parses of one file are equal
-/// whatever their limits.
+/// The `max_alloc` a parse kept. Not part of the value: two parses of one file with different
+/// `max_alloc` are equal.
 #[derive(Debug, Clone, Copy)]
 struct AllocCap(usize);
 
@@ -620,8 +620,10 @@ impl Heif {
     }
 
     /// The distinct `from` ids of the `kind` references to `id` whose item passes `keep`, in
-    /// reference order. The list and a mark per item are charged to `budget`: the memory is
-    /// bounded by the items, however many references repeat an id.
+    /// reference order. Everything is charged to `budget`, and the memory is bounded by the
+    /// items, however many references repeat an id: up to as many references as items, their
+    /// ids are sorted and deduplicated (the work follows the references, so a walk over every
+    /// image costs the references once); above that, a mark per item.
     fn sources(
         &self,
         id: u32,
@@ -629,20 +631,42 @@ impl Heif {
         keep: impl Fn(&Item) -> bool,
         budget: &Budget<'_>,
     ) -> Result<Vec<u32>, Error> {
-        let refs = || self.refs_to(id).filter(move |r| r.kind.0 == *kind);
         let at = |from: u32| {
             let pos = self.index.binary_search_by_key(&from, |e| e.0).ok()?;
             usize::try_from(self.index.get(pos)?.1).ok()
         };
+        let kept = |from: u32| {
+            at(from)
+                .filter(|&i| self.items.get(i).is_some_and(&keep))
+                .is_some()
+        };
+        let refs = || {
+            self.refs_to(id)
+                .filter(move |r| r.kind.0 == *kind)
+                .filter(move |r| kept(r.from))
+        };
+        let count = refs().count();
         let len = self.items.len();
+        if count <= len {
+            let held = count.saturating_mul(size_of::<(u32, usize)>());
+            let mut v = budget.vec::<(u32, usize)>(count)?;
+            v.extend(refs().enumerate().map(|(seq, r)| (r.from, seq)));
+            // Sorted by (id, order): dedup keeps the first reference of each id.
+            v.sort_unstable();
+            v.dedup_by_key(|e| e.0);
+            v.sort_unstable_by_key(|e| e.1);
+            let mut out = budget.vec::<u32>(v.len())?;
+            out.extend(v.iter().map(|e| e.0));
+            drop(v);
+            budget.release(held);
+            return Ok(out);
+        }
         let mut marks = budget.vec::<bool>(len)?;
         marks.resize(len, false);
         let mut n = 0usize;
         for r in refs() {
-            let Some(i) = at(r.from) else { continue };
-            if let (Some(m), Some(it)) = (marks.get_mut(i), self.items.get(i))
+            if let Some(m) = at(r.from).and_then(|i| marks.get_mut(i))
                 && !*m
-                && keep(it)
             {
                 *m = true;
                 n = n.saturating_add(1);
@@ -816,6 +840,8 @@ impl Heif {
         for (input, id) in o.inputs.iter().zip(ids) {
             inputs.push(OverlayInput { id, ..*input });
         }
+        // The id list was moved into the loop and is freed.
+        budget.release(o.inputs.len().saturating_mul(size_of::<u32>()));
         Ok(Overlay {
             fill: o.fill,
             width: o.width,
