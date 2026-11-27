@@ -16,9 +16,15 @@ pub(crate) struct Budget<'a> {
 
 impl<'a> Budget<'a> {
     pub(crate) fn new(limits: &Limits, cancel: &'a AtomicBool) -> Self {
+        Self::with_max(limits.max_alloc, cancel)
+    }
+
+    /// A ledger of `max` bytes: for a call that takes no `Limits` and uses the `max_alloc` of
+    /// the parse.
+    pub(crate) fn with_max(max: usize, cancel: &'a AtomicBool) -> Self {
         Self {
             used: Cell::new(0),
-            max: limits.max_alloc,
+            max,
             cancel,
         }
     }
