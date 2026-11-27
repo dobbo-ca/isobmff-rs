@@ -10,6 +10,8 @@ pub struct Limits {
     /// [`read_movie`](crate::read_movie) makes, the windows of a sample walk and the result of
     /// `Track::sync_samples`, metadata copies) is charged before it is allocated. More is
     /// [`Error::LimitExceeded`](crate::Error::LimitExceeded)`(`[`Limit::Alloc`](crate::Limit::Alloc)`)`.
+    /// [`Heif::image`](crate::Heif::image) takes no `Limits`: it charges the id lists of the
+    /// image to the `max_alloc` of the parse that made the `Heif`.
     pub max_alloc: usize,
     /// The most OS threads one call uses (default `std::thread::available_parallelism()`). This
     /// crate never spawns a thread: every call runs on the calling thread, for every value. The

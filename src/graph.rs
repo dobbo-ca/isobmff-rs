@@ -1,13 +1,14 @@
 //! The item graph: items, references and properties joined into [`Image`]s.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::boxes::Ctx;
 use crate::budget::Budget;
-use crate::derived::{GainMapMetadata, Grid, Overlay, parse_grid, parse_iovl, parse_tmap};
+use crate::derived::{
+    GainMapMetadata, Grid, Overlay, OverlayInput, parse_grid, parse_iovl, parse_tmap,
+};
 use crate::error::ItemError;
 use crate::ftyp::Ftyp;
 use crate::meta::{Association, EntityGroup, Meta, Reference, iloc};
@@ -137,6 +138,8 @@ pub struct Heif {
     /// Box counts of the parse.
     pub stats: Stats,
     max_pixels: u64,
+    /// The `max_alloc` of the parse: the budget of each [`Heif::image`] call.
+    max_alloc: AllocCap,
     /// (item id, position in `items`), sorted.
     index: Vec<(u32, u32)>,
     /// (`from` id, position in `references`), sorted.
@@ -147,6 +150,19 @@ pub struct Heif {
     /// sorted, one entry per (entity, group).
     altr: Vec<(u32, u32, u32)>,
 }
+
+/// The `max_alloc` a parse kept. Not part of the value: two parses of one file with different
+/// `max_alloc` are equal.
+#[derive(Debug, Clone, Copy)]
+struct AllocCap(usize);
+
+impl PartialEq for AllocCap {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for AllocCap {}
 
 /// The codec of a coded image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -545,6 +561,7 @@ pub(crate) fn build<F: Fetch>(
             max_depth: ctx.max_depth.get(),
         },
         max_pixels: ctx.limits.max_pixels,
+        max_alloc: AllocCap(ctx.limits.max_alloc),
         index,
         fwd,
         rev,
@@ -581,12 +598,93 @@ impl Heif {
             .filter_map(|e| self.references.get(usize::try_from(e.1).ok()?))
     }
 
-    /// The `dimg` inputs of a derived item, in order.
-    fn dimg(&self, id: u32) -> Vec<u32> {
-        self.refs_from(id)
-            .filter(|r| r.kind.0 == *b"dimg")
-            .flat_map(|r| r.to.iter().copied())
-            .collect()
+    /// The `dimg` inputs of a derived item, in order, charged to `budget`. `Malformed(what)`
+    /// unless there are exactly `want`, found before the list is made.
+    fn dimg(
+        &self,
+        id: u32,
+        want: u64,
+        what: &'static str,
+        budget: &Budget<'_>,
+    ) -> Result<Vec<u32>, Error> {
+        let refs = || self.refs_from(id).filter(|r| r.kind.0 == *b"dimg");
+        let n = refs().fold(0usize, |n, r| n.saturating_add(r.to.len()));
+        if n as u64 != want {
+            return Err(Error::Malformed(what));
+        }
+        let mut out = budget.vec::<u32>(n)?;
+        for r in refs() {
+            out.extend_from_slice(&r.to);
+        }
+        Ok(out)
+    }
+
+    /// The distinct `from` ids of the `kind` references to `id` whose item passes `keep`, in
+    /// reference order. Everything is charged to `budget`, and the memory is bounded by the
+    /// items, however many references repeat an id: up to as many references as items, their
+    /// ids are sorted and deduplicated (the work follows the references, so a walk over every
+    /// image costs the references once); above that, a mark per item.
+    fn sources(
+        &self,
+        id: u32,
+        kind: &[u8; 4],
+        keep: impl Fn(&Item) -> bool,
+        budget: &Budget<'_>,
+    ) -> Result<Vec<u32>, Error> {
+        let at = |from: u32| {
+            let pos = self.index.binary_search_by_key(&from, |e| e.0).ok()?;
+            usize::try_from(self.index.get(pos)?.1).ok()
+        };
+        let kept = |from: u32| {
+            at(from)
+                .filter(|&i| self.items.get(i).is_some_and(&keep))
+                .is_some()
+        };
+        let refs = || {
+            self.refs_to(id)
+                .filter(move |r| r.kind.0 == *kind)
+                .filter(move |r| kept(r.from))
+        };
+        let count = refs().count();
+        let len = self.items.len();
+        if count <= len {
+            let held = count.saturating_mul(size_of::<(u32, usize)>());
+            let mut v = budget.vec::<(u32, usize)>(count)?;
+            v.extend(refs().enumerate().map(|(seq, r)| (r.from, seq)));
+            // Sorted by (id, order): dedup keeps the first reference of each id.
+            v.sort_unstable();
+            v.dedup_by_key(|e| e.0);
+            v.sort_unstable_by_key(|e| e.1);
+            let mut out = budget.vec::<u32>(v.len())?;
+            out.extend(v.iter().map(|e| e.0));
+            drop(v);
+            budget.release(held);
+            return Ok(out);
+        }
+        let mut marks = budget.vec::<bool>(len)?;
+        marks.resize(len, false);
+        let mut n = 0usize;
+        for r in refs() {
+            if let Some(m) = at(r.from).and_then(|i| marks.get_mut(i))
+                && !*m
+            {
+                *m = true;
+                n = n.saturating_add(1);
+            }
+        }
+        let mut out = budget.vec::<u32>(n)?;
+        // A mark is cleared when its id is listed, so each id is listed once.
+        for r in refs() {
+            if let Some(m) = at(r.from).and_then(|i| marks.get_mut(i))
+                && *m
+            {
+                *m = false;
+                out.push(r.from);
+            }
+        }
+        drop(marks);
+        budget.release(len);
+        Ok(out)
     }
 
     /// The property of an association, or `Malformed("ipma")` for an index past `ipco`.
@@ -617,23 +715,14 @@ impl Heif {
             })
     }
 
-    /// The Exif and XMP items that describe `id` (`cdsc`), ascending.
-    fn linked_metadata(&self, id: u32) -> (Vec<u32>, Vec<u32>) {
-        let (mut exif, mut xmp) = (Vec::new(), Vec::new());
-        for r in self.refs_to(id).filter(|r| r.kind.0 == *b"cdsc") {
-            if let Some(it) = self.item(r.from) {
-                if it.item_type.0 == *b"Exif" {
-                    exif.push(it.id);
-                } else if it.item_type.0 == *b"mime" && it.content_type == XMP_TYPE {
-                    xmp.push(it.id);
-                }
-            }
-        }
+    /// The Exif and XMP items that describe `id` (`cdsc`), ascending, charged to `budget`.
+    fn linked_metadata(&self, id: u32, budget: &Budget<'_>) -> Result<(Vec<u32>, Vec<u32>), Error> {
+        let mut exif = self.sources(id, b"cdsc", |it| it.item_type.0 == *b"Exif", budget)?;
+        let is_xmp = |it: &Item| it.item_type.0 == *b"mime" && it.content_type == XMP_TYPE;
+        let mut xmp = self.sources(id, b"cdsc", is_xmp, budget)?;
         exif.sort_unstable();
-        exif.dedup();
         xmp.sort_unstable();
-        xmp.dedup();
-        (exif, xmp)
+        Ok((exif, xmp))
     }
 
     /// The `altr` index entries of entity `id`: (id, group, first position), sorted by group.
@@ -647,19 +736,21 @@ impl Heif {
     /// `id` in an `altr` group, else an Apple `auxl` gain map.
     ///
     /// Each `tmap` is looked at once; the `altr` order comes from the sorted index built with the
-    /// graph, so a call costs O(candidates x groups holding `id` x log entities), not a group scan.
-    fn gain_map(&self, id: u32, aux: &[Aux]) -> Option<GainMap> {
-        let mut seen = HashSet::new();
-        let mut cands = Vec::new();
-        for r in self.refs_to(id).filter(|r| r.kind.0 == *b"dimg") {
-            let t = r.from;
-            let Some(item) = self.item(t).filter(|i| i.item_type.0 == *b"tmap") else {
+    /// graph, and each candidate walks its own groups, so a call costs O(`altr` entries of the
+    /// candidates x log groups), at most the `altr` index once, not a group scan per candidate.
+    /// The lists are bounded by the `tmap` items and charged to `budget`.
+    fn gain_map(
+        &self,
+        id: u32,
+        aux: &[Aux],
+        budget: &Budget<'_>,
+    ) -> Result<Option<GainMap>, Error> {
+        let tmaps = self.sources(id, b"dimg", |it| it.item_type.0 == *b"tmap", budget)?;
+        let mut cands = budget.vec::<(u32, u32, Option<GainMapMetadata>)>(tmaps.len())?;
+        for &t in &tmaps {
+            let Some(item) = self.item(t) else {
                 continue;
             };
-            // Only tmap items enter the set, so it is bounded by the items.
-            if !seen.insert(t) {
-                continue;
-            }
             let Some(Ok(Derived::Tmap(metadata))) = &item.derived else {
                 continue;
             };
@@ -673,50 +764,48 @@ impl Heif {
                 cands.push((t, gm, *metadata));
             }
         }
-        // The first candidate (in reference order) that precedes `id` in some `altr` group,
-        // from the sorted `altr` index: no group scan per call.
+        // The first candidate (in reference order) that precedes `id` in some `altr` group. The
+        // groups of each candidate are walked and looked up among the groups of `id` (sorted by
+        // group); each `tmap` is a candidate once, so the walks are at most the `altr` entries.
         let mine = self.altr_of(id);
         let best = cands.iter().find(|c| {
-            let theirs = self.altr_of(c.0);
-            mine.iter().any(|&(_, g, pid)| {
-                theirs
-                    .binary_search_by_key(&g, |a| a.1)
+            self.altr_of(c.0).iter().any(|&(_, g, tpos)| {
+                mine.binary_search_by_key(&g, |a| a.1)
                     .ok()
-                    .and_then(|i| theirs.get(i))
-                    .is_some_and(|a| a.2 < pid)
+                    .and_then(|i| mine.get(i))
+                    .is_some_and(|a| tpos < a.2)
             })
         });
         if let Some(&(t, gm, metadata)) = best {
-            return Some(GainMap {
+            return Ok(Some(GainMap {
                 image: gm,
                 tmap: Some(t),
                 metadata,
                 source: GainMapSource::Tmap,
                 xmp: Vec::new(),
-            });
+            }));
         }
-        let a = aux.iter().find(|a| &*a.aux_type == APPLE_GAIN_MAP)?;
-        Some(GainMap {
+        let Some(a) = aux.iter().find(|a| &*a.aux_type == APPLE_GAIN_MAP) else {
+            return Ok(None);
+        };
+        Ok(Some(GainMap {
             image: a.id,
             tmap: None,
             metadata: None,
             source: GainMapSource::Apple,
-            xmp: self.linked_metadata(a.id).1,
-        })
+            xmp: self.linked_metadata(a.id, budget)?.1,
+        }))
     }
 
     /// The `grid` image of item `id` with its tiles, checked against the tiles' `ispe`.
-    fn grid(&self, item: &Item) -> Result<Grid, Error> {
+    fn grid(&self, item: &Item, budget: &Budget<'_>) -> Result<Grid, Error> {
         let mut g = match &item.derived {
             Some(Ok(Derived::Grid(g))) => g.clone(),
             Some(Err(e)) => return Err(e.clone()),
             _ => return Err(Error::Malformed("grid")),
         };
-        let tiles = self.dimg(item.id);
         let want = u64::from(g.rows).saturating_mul(u64::from(g.columns));
-        if tiles.len() as u64 != want {
-            return Err(Error::Malformed("grid"));
-        }
+        let tiles = self.dimg(item.id, want, "grid", budget)?;
         let mut size = None;
         for &t in &tiles {
             let s = self
@@ -739,20 +828,26 @@ impl Heif {
     }
 
     /// The `iovl` image of item `id` with its input ids.
-    fn overlay(&self, item: &Item) -> Result<Overlay, Error> {
-        let mut o = match &item.derived {
-            Some(Ok(Derived::Overlay(o))) => o.clone(),
+    fn overlay(&self, item: &Item, budget: &Budget<'_>) -> Result<Overlay, Error> {
+        let o = match &item.derived {
+            Some(Ok(Derived::Overlay(o))) => o,
             Some(Err(e)) => return Err(e.clone()),
             _ => return Err(Error::Malformed("iovl")),
         };
-        let ids = self.dimg(item.id);
-        if ids.len() != o.inputs.len() {
-            return Err(Error::Malformed("iovl"));
+        // The count is checked before the inputs are copied, and the copy is charged.
+        let ids = self.dimg(item.id, o.inputs.len() as u64, "iovl", budget)?;
+        let mut inputs = budget.vec::<OverlayInput>(o.inputs.len())?;
+        for (input, id) in o.inputs.iter().zip(ids) {
+            inputs.push(OverlayInput { id, ..*input });
         }
-        for (input, id) in o.inputs.iter_mut().zip(ids) {
-            input.id = id;
-        }
-        Ok(o)
+        // The id list was moved into the loop and is freed.
+        budget.release(o.inputs.len().saturating_mul(size_of::<u32>()));
+        Ok(Overlay {
+            fill: o.fill,
+            width: o.width,
+            height: o.height,
+            inputs,
+        })
     }
 
     /// The image item `id` with its properties, derived structure and linked items.
@@ -766,8 +861,18 @@ impl Heif {
     /// index is past `ipco`, a coded image lacks its `hvcC` or `av1C`, or a grid, overlay or
     /// identity image does not match its tiles or inputs; [`Error::LimitExceeded`] with
     /// `Limit::Pixels` for an image larger than the `max_pixels` of the parse (and the limit
-    /// error of the item's payload, stored at parse time).
+    /// error of the item's payload, stored at parse time), or with `Limit::Alloc` when the id
+    /// lists of the image (tiles, inputs, auxiliary images, thumbnails, Exif and XMP items) do not
+    /// fit the `max_alloc` of the parse; [`Error::OutOfMemory`].
+    ///
+    /// The id lists are charged to a budget of the `max_alloc` of the parse, one per call, before
+    /// they are made. They are bounded by the items of the file: a reference repeated a million
+    /// times gives one id, and a grid, overlay or identity image with the wrong count of `dimg`
+    /// ids is an error before its list is made.
     pub fn image(&self, id: u32) -> Result<Image, Error> {
+        let never = AtomicBool::new(false);
+        let budget = Budget::with_max(self.max_alloc.0, &never);
+        let budget = &budget;
         let item = self.item(id).ok_or(Error::NoSuchItem(id))?;
         if !is_image_type(item.item_type) {
             return Err(Error::Unsupported("item type"));
@@ -877,31 +982,26 @@ impl Heif {
         if !unknown_essential {
             img.kind = match (coded, &item.item_type.0) {
                 (Some(kind), _) => kind,
-                (None, b"grid") => ImageKind::Grid(self.grid(item)?),
-                (None, b"iovl") => ImageKind::Overlay(self.overlay(item)?),
-                (None, b"iden") => match self.dimg(id).as_slice() {
+                (None, b"grid") => ImageKind::Grid(self.grid(item, budget)?),
+                (None, b"iovl") => ImageKind::Overlay(self.overlay(item, budget)?),
+                (None, b"iden") => match self.dimg(id, 1, "iden", budget)?.as_slice() {
                     &[input] => ImageKind::Identity { input },
                     _ => return Err(Error::Malformed("iden")),
                 },
                 _ => ImageKind::Unsupported(item.item_type),
             };
         }
-        let mut aux_ids: Vec<u32> = self
-            .refs_to(id)
-            .filter(|r| r.kind.0 == *b"auxl")
-            .filter(|r| {
-                self.item(r.from)
-                    .is_some_and(|it| is_image_type(it.item_type))
-            })
-            .map(|r| r.from)
-            .collect();
+        let is_image = |it: &Item| is_image_type(it.item_type);
+        let mut aux_ids = self.sources(id, b"auxl", is_image, budget)?;
         aux_ids.sort_unstable();
-        aux_ids.dedup();
+        img.aux = budget.vec::<Aux>(aux_ids.len())?;
+        // One shared empty type for every auxiliary image without `auxC`.
+        let none: Arc<str> = Arc::from("");
         for aux_id in aux_ids {
             let (aux_type, subtype) = self
                 .item(aux_id)
                 .and_then(|it| self.aux_c(it))
-                .unwrap_or_else(|| (Arc::from(""), Extent::default()));
+                .unwrap_or_else(|| (Arc::clone(&none), Extent::default()));
             if img.alpha.is_none() && ALPHA_TYPES.contains(&&*aux_type) {
                 img.alpha = Some(aux_id);
             }
@@ -914,20 +1014,11 @@ impl Heif {
                 subtype,
             });
         }
-        img.thumbnails = self
-            .refs_to(id)
-            .filter(|r| r.kind.0 == *b"thmb")
-            .filter(|r| {
-                self.item(r.from)
-                    .is_some_and(|it| is_image_type(it.item_type))
-            })
-            .map(|r| r.from)
-            .collect();
+        img.thumbnails = self.sources(id, b"thmb", is_image, budget)?;
         img.thumbnails.sort_unstable();
-        img.thumbnails.dedup();
-        (img.exif, img.xmp) = self.linked_metadata(id);
+        (img.exif, img.xmp) = self.linked_metadata(id, budget)?;
         img.premultiplied = self.refs_from(id).any(|r| r.kind.0 == *b"prem");
-        img.gain_map = self.gain_map(id, &img.aux);
+        img.gain_map = self.gain_map(id, &img.aux, budget)?;
         Ok(img)
     }
 
@@ -1065,7 +1156,7 @@ impl Heif {
     ) -> Result<Metadata<'a>, Error> {
         let budget = Budget::new(limits, cancel);
         self.item(image).ok_or(Error::NoSuchItem(image))?;
-        let (exif_ids, xmp_ids) = self.linked_metadata(image);
+        let (exif_ids, xmp_ids) = self.linked_metadata(image, &budget)?;
         let exif = match exif_ids.first() {
             Some(&id) => {
                 let item = self.metadata_item(data, id, limits, &budget)?;
